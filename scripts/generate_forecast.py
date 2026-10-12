@@ -17,6 +17,9 @@ def generate_all_forecasts(horizon_days: int = 30):
     logger.info(f"Running standalone forecast & optimization generation (horizon: {horizon_days}d)...")
     db = SessionLocal()
     try:
+        from src.api.routes import invalidate_cleaned_cache
+        invalidate_cleaned_cache()
+
         raw_data_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
         clean_df, _, _ = load_and_prepare_data(raw_data_path)
 

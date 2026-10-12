@@ -74,12 +74,12 @@ def create_time_series_features(df: pd.DataFrame) -> pd.DataFrame:
     res["rolling_std_14"] = past_grouped.rolling(window=14, min_periods=1).std().fillna(0).reset_index(drop=True)
     res["rolling_std_28"] = past_grouped.rolling(window=28, min_periods=1).std().fillna(0).reset_index(drop=True)
 
-    # Fill any initial early lag NaNs with backfill/median per product to allow training on whole dataset
-    for col in LAG_FEATURES:
-        res[col] = res.groupby("product_id")[col].bfill().ffill().fillna(0)
-
-    for col in ROLLING_FEATURES:
-        res[col] = res.groupby("product_id")[col].bfill().ffill().fillna(0)
+    # Fill initial NaNs using ONLY past observations (backward fill from earlier rows).
+    # Never use .ffill() here — it would propagate future values into the training frame.
+    for col in LAG_FEATURES + ROLLING_FEATURES:
+        res[col] = res.groupby("product_id")[col].transform(
+            lambda s: s.bfill().fillna(0)
+        )
 
     return res
 

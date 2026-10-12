@@ -9,8 +9,9 @@ from src.api.routes import router
 from src.utils.logger import logger
 from src.database.session import Base, engine
 
-# Initialize tables
-Base.metadata.create_all(bind=engine)
+# Initialize tables only in development. In production, use Alembic migrations.
+if settings.app_env == "development":
+    Base.metadata.create_all(bind=engine)
 
 app = FastAPI(
     title="DemandIQ AI",
@@ -20,10 +21,11 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS setup
+# CORS setup — restrict to configured origins in production
+_cors_origins = settings.cors_origins if settings.app_env == "production" else settings.cors_origins + ["*"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins + ["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

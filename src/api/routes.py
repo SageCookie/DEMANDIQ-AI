@@ -4,6 +4,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
+from functools import lru_cache
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -28,6 +29,29 @@ from src.api.schemas import (
 from src.utils.logger import logger
 
 router = APIRouter(prefix="/api/v1")
+
+# Cache cleaned dataset keyed by file mtime to avoid re-parsing the CSV on every request.
+_cleaned_cache: Dict[str, Any] = {"df": None, "mtime": None}
+
+
+def _get_cleaned_data():
+    """Return cached cleaned DataFrame, re-loading only if the source CSV changed."""
+    raw_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    try:
+        mtime = raw_path.stat().st_mtime
+    except OSError:
+        mtime = None
+    if _cleaned_cache["df"] is None or _cleaned_cache["mtime"] != mtime:
+        clean_df, _, _ = load_and_prepare_data(raw_path)
+        _cleaned_cache["df"] = clean_df
+        _cleaned_cache["mtime"] = mtime
+    return _cleaned_cache["df"]
+
+
+def invalidate_cleaned_cache():
+    """Drop the cached cleaned dataset (call after retraining/re-ingestion)."""
+    _cleaned_cache["df"] = None
+    _cleaned_cache["mtime"] = None
 
 # Helper error response
 def create_error(code: str, message: str, status_code: int = 400):
@@ -102,11 +126,17 @@ def get_products(category: Optional[str] = None, db: Session = Depends(get_db)):
         ))
     return res
 
+def _get_product(db: Session, product_id: str):
+    """Resolve a product by product_code or numeric id safely."""
+    query = db.query(Product).filter(Product.product_code == product_id)
+    if product_id.isdigit():
+        query = query.or_(Product.id == int(product_id))
+    return query.first()
+
+
 @router.get("/products/{product_id}", response_model=ProductResponse)
 def get_product_detail(product_id: str, db: Session = Depends(get_db)):
-    prod = db.query(Product).filter(
-        (Product.product_code == product_id) | (Product.id == int(product_id) if product_id.isdigit() else False)
-    ).first()
+    prod = _get_product(db, product_id)
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"The requested product '{product_id}' does not exist.", 404)
 
@@ -165,9 +195,7 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
 
 @router.put("/products/{product_id}", response_model=ProductResponse)
 def update_product(product_id: str, payload: ProductUpdate, db: Session = Depends(get_db)):
-    prod = db.query(Product).filter(
-        (Product.product_code == product_id) | (Product.id == int(product_id) if product_id.isdigit() else False)
-    ).first()
+    prod = _get_product(db, product_id)
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"The requested product '{product_id}' does not exist.", 404)
 
@@ -201,9 +229,7 @@ def update_product(product_id: str, payload: ProductUpdate, db: Session = Depend
 
 @router.post("/forecasts", response_model=ForecastResponse)
 def generate_forecast_endpoint(payload: ForecastRequest, db: Session = Depends(get_db)):
-    prod = db.query(Product).filter(
-        (Product.product_code == payload.product_id) | (Product.id == int(payload.product_id) if payload.product_id.isdigit() else False)
-    ).first()
+    prod = _get_product(db, payload.product_id)
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"Product '{payload.product_id}' not found.", 404)
 
@@ -211,7 +237,7 @@ def generate_forecast_endpoint(payload: ForecastRequest, db: Session = Depends(g
     if not raw_data_path.exists():
         create_error("INTERNAL_SERVER_ERROR", "Historical dataset not initialized.", 500)
 
-    clean_df, _, _ = load_and_prepare_data(raw_data_path)
+    clean_df = _get_cleaned_data()
     engine = ForecastEngine.get_instance()
 
     try:
@@ -320,9 +346,7 @@ def get_recommendations(
 
 @router.get("/inventory/optimization/{product_id}")
 def get_product_optimization_details(product_id: str, db: Session = Depends(get_db)):
-    prod = db.query(Product).filter(
-        (Product.product_code == product_id) | (Product.id == int(product_id) if product_id.isdigit() else False)
-    ).first()
+    prod = _get_product(db, product_id)
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"Product '{product_id}' not found.", 404)
 
@@ -546,21 +570,39 @@ def train_model_endpoint(db: Session = Depends(get_db)):
 
 @router.post("/models/{model_version}/promote")
 def promote_model(model_version: str, db: Session = Depends(get_db)):
-    """Promotes a validated model version to production."""
+    """Promotes a validated model version to production by swapping artifacts."""
     run = db.query(ModelRun).filter(ModelRun.model_version == model_version).first()
     if not run:
         create_error("MODEL_NOT_FOUND", f"Model version '{model_version}' not found in registry.", 404)
+
+    # Locate the experiment artifact for this version
+    exp_dir = settings.base_dir / "models" / "experiments"
+    exp_artifact = exp_dir / f"{run.model_name.lower().replace(' ', '_')}_{model_version}.joblib"
+    exp_metadata = exp_dir / f"metadata_{model_version}.json"
+
+    if not exp_artifact.exists():
+        create_error("MODEL_NOT_FOUND",
+                     f"Artifact for version {model_version} not found in experiments directory.", 404)
 
     # Retire previous production models
     db.query(ModelRun).filter(ModelRun.status == "PRODUCTION").update({"status": "RETIRED"})
     run.status = "PRODUCTION"
     db.commit()
 
+    # Physically swap the production artifacts so the promoted version actually serves traffic
+    import shutil
+    prod_artifact = Path(settings.model_path)
+    prod_metadata = Path(settings.metadata_path)
+    shutil.copy2(exp_artifact, prod_artifact)
+    if exp_metadata.exists():
+        shutil.copy2(exp_metadata, prod_metadata)
+
     ForecastEngine.get_instance().reload()
     return {
         "status": "SUCCESS",
-        "message": f"Model {model_version} promoted to PRODUCTION.",
-        "promoted_version": model_version
+        "message": f"Model {model_version} promoted to PRODUCTION. Artifacts swapped.",
+        "promoted_version": model_version,
+        "artifact_path": str(prod_artifact),
     }
 
 # ----------------- Data Quality -----------------
@@ -578,6 +620,41 @@ def get_data_quality():
         "total_records": len(clean_df),
         "health_score": val_report.calculate_health_score(),
         "status": "EXCELLENT" if val_report.calculate_health_score() > 95 else "NEEDS_REVIEW"
+    }
+
+# ----------------- Monitoring & Drift Detection -----------------
+
+@router.get("/monitoring/drift")
+def get_drift_report(db: Session = Depends(get_db)):
+    """Detects data/concept drift between training reference and recent production data."""
+    from src.monitoring.drift_detector import DataDriftDetector
+
+    raw_data_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    if not raw_data_path.exists():
+        create_error("INTERNAL_SERVER_ERROR", "Historical data source missing.", 500)
+
+    clean_df, _, _ = load_and_prepare_data(raw_data_path)
+    engine = ForecastEngine.get_instance()
+    metadata = engine.get_metadata()
+
+    # Reference = first 70% of history (training period), current = last 30%
+    from src.features.engineering import chronological_split
+    _, _, full = chronological_split(clean_df, 0.70, 0.15)
+    train_df, _, test_df = chronological_split(clean_df, 0.70, 0.15)
+
+    feature_cols = ["quantity_sold", "unit_price", "lead_time_days"]
+    detector = DataDriftDetector()
+    report = detector.detect_dataset_drift(
+        reference_df=train_df,
+        current_df=test_df,
+        features=feature_cols,
+        target_column="quantity_sold",
+    )
+    return {
+        "report": report.to_dict(),
+        "production_model": metadata.get("model_name"),
+        "production_version": metadata.get("model_version"),
+        "training_date": metadata.get("training_date"),
     }
 
 # ----------------- Auth -----------------
@@ -614,14 +691,8 @@ def login(payload: LoginRequest):
             token=f"demandiq_jwt_token_{username_lower}_{int(time.time())}"
         )
 
-    # Default fallback for demo / review
-    return UserProfile(
-        id="usr_admin",
-        username=payload.username or "admin",
-        name="Administrator",
-        role="ADMIN",
-        token=f"demandiq_jwt_token_admin_{int(time.time())}"
-    )
+    # Reject unknown credentials — no silent admin fallback in production
+    create_error("INVALID_CREDENTIALS", "Invalid username or password.", 401)
 
 @router.get("/auth/me", response_model=UserProfile)
 def get_current_user():
