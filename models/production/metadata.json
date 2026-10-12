@@ -1,0 +1,128 @@
+{
+  "model_name": "Random Forest",
+  "model_version": "v1.54951",
+  "status": "PRODUCTION",
+  "training_date": "2026-10-08 15:52:31",
+  "dataset_version": "1.0.0",
+  "feature_version": "1.0.0",
+  "features_used": [
+    "day",
+    "day_of_week",
+    "week_of_year",
+    "month",
+    "quarter",
+    "year",
+    "is_weekend",
+    "is_month_start",
+    "is_month_end",
+    "lag_1",
+    "lag_7",
+    "lag_14",
+    "lag_28",
+    "rolling_mean_7",
+    "rolling_mean_14",
+    "rolling_mean_28",
+    "rolling_std_7",
+    "rolling_std_14",
+    "rolling_std_28",
+    "unit_price",
+    "lead_time_days"
+  ],
+  "train_records": 3720,
+  "test_records": 660,
+  "test_metrics": {
+    "MAE": 3.91,
+    "RMSE": 5.6996,
+    "MAPE": 23.54,
+    "WAPE": 17.57,
+    "sMAPE": 23.18,
+    "training_time_ms": 177.61
+  },
+  "validation_metrics": {
+    "MAE": 4.1067,
+    "RMSE": 5.9011,
+    "MAPE": 20.76,
+    "WAPE": 16.48,
+    "sMAPE": 21.63,
+    "training_time_ms": 164.4,
+    "model_name": "Random Forest"
+  },
+  "all_model_comparisons": [
+    {
+      "MAE": 7.9348,
+      "RMSE": 11.4047,
+      "MAPE": 64.14,
+      "WAPE": 31.85,
+      "sMAPE": 36.87,
+      "training_time_ms": 13.16,
+      "model_name": "Naive Forecast"
+    },
+    {
+      "MAE": 6.7509,
+      "RMSE": 9.2164,
+      "MAPE": 53.91,
+      "WAPE": 27.1,
+      "sMAPE": 36.08,
+      "training_time_ms": 15.05,
+      "model_name": "Moving Average"
+    },
+    {
+      "MAE": 10.4,
+      "RMSE": 14.9062,
+      "MAPE": 75.26,
+      "WAPE": 41.75,
+      "sMAPE": 54.78,
+      "training_time_ms": 18.62,
+      "model_name": "Seasonal Naive"
+    },
+    {
+      "MAE": 4.2228,
+      "RMSE": 6.1023,
+      "MAPE": 24.6,
+      "WAPE": 16.95,
+      "sMAPE": 23.11,
+      "training_time_ms": 32.15,
+      "model_name": "Linear Regression"
+    },
+    {
+      "MAE": 4.1067,
+      "RMSE": 5.9011,
+      "MAPE": 20.76,
+      "WAPE": 16.48,
+      "sMAPE": 21.63,
+      "training_time_ms": 164.4,
+      "model_name": "Random Forest"
+    },
+    {
+      "MAE": 4.1988,
+      "RMSE": 6.1666,
+      "MAPE": 20.92,
+      "WAPE": 16.85,
+      "sMAPE": 21.75,
+      "training_time_ms": 138.92,
+      "model_name": "XGBoost"
+    }
+  ],
+  "hyperparameters": {
+    "bootstrap": true,
+    "ccp_alpha": 0.0,
+    "criterion": "squared_error",
+    "max_depth": 12,
+    "max_features": 1.0,
+    "max_leaf_nodes": null,
+    "max_samples": null,
+    "min_impurity_decrease": 0.0,
+    "min_samples_leaf": 1,
+    "min_samples_split": 2,
+    "min_weight_fraction_leaf": 0.0,
+    "monotonic_cst": null,
+    "n_estimators": 60,
+    "n_jobs": -1,
+    "oob_score": false,
+    "random_state": 42,
+    "verbose": 0,
+    "warm_start": false
+  },
+  "artifact_path": "models\\production\\demand_model.joblib",
+  "last_updated": "2026-10-08T15:52:31Z"
+}

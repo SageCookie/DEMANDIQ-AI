@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: demandiq-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: demandiq_user
+      POSTGRES_PASSWORD: demandiq_secure_password_2026
+      POSTGRES_DB: demandiq
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demandiq_user -d demandiq"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: demandiq-api
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - APP_ENV=production
+      - DATABASE_URL=postgresql://demandiq_user:demandiq_secure_password_2026@postgres:5432/demandiq
+      - MODEL_PATH=/app/models/production/demand_model.joblib
+      - METADATA_PATH=/app/models/production/metadata.json
+      - DEFAULT_FORECAST_HORIZON=30
+      - DEFAULT_SERVICE_LEVEL=0.95
+      - CORS_ORIGINS=http://localhost:5173,http://localhost:3000
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+    ports:
+      - "8000:8000"
+
+  dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: demandiq-dashboard
+    restart: always
+    depends_on:
+      - api
+    ports:
+      - "5173:80"
+
+volumes:
+  pgdata:
