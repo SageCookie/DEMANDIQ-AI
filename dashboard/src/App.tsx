@@ -12,19 +12,115 @@ import { DataQualityPage } from "./pages/DataQualityPage";
 import { SystemHealthPage } from "./pages/SystemHealthPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ProductDrawer } from "./components/ProductDrawer";
-import { DashboardSummary, Product, UserRole } from "./types";
-import { api } from "./lib/api";
+import { DashboardSummary, Product, User, UserRole } from "./types";
+import { LoginPage } from "./components/LoginPage";
+import { api, getStoredToken, clearStoredToken, onUnauthorized } from "./lib/api";
 
 export function App() {
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
+  const [authStatus, setAuthStatus] = useState<"checking" | "authenticated" | "unauthenticated" | "error">("checking");
+  const [authError, setAuthError] = useState<string | null>(null);
   const [showLanding, setShowLanding] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<NavTab>("dashboard");
-  const [currentRole, setCurrentRole] = useState<UserRole>("ADMIN");
+  const [currentRole, setCurrentRole] = useState<UserRole>("VIEWER");
   const [summary, setSummary] = useState<DashboardSummary | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [forecastTargetProduct, setForecastTargetProduct] = useState<string>("P001");
+
+  // Register session-expiry / 401 handler (once) to avoid redirect loops / duplicate notifications
+  useEffect(() => {
+    const handle401 = () => {
+      clearStoredToken();
+      setCurrentUser(null);
+      setCurrentRole("VIEWER");
+      setAuthStatus("unauthenticated");
+    };
+    onUnauthorized(handle401);
+    return () => { onUnauthorized(null); };
+  }, []);
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkSession() {
+      const token = getStoredToken();
+      if (!token) {
+        if (!cancelled) {
+          setAuthStatus("unauthenticated");
+          setCurrentUser(null);
+          setCurrentRole("VIEWER");
+        }
+        return;
+      }
+
+      try {
+        const user = await api.getCurrentUser();
+        if (!cancelled) {
+          setCurrentUser(user);
+          setCurrentRole(user.role);
+          setAuthStatus("authenticated");
+          setAuthError(null);
+        }
+      } catch (err: unknown) {
+        if (cancelled) return;
+        const msg = err instanceof Error ? err.message : String(err);
+        const is401 = msg.includes("401") || msg.toLowerCase().includes("unauthorized") || msg.toLowerCase().includes("invalid");
+        if (is401) {
+          clearStoredToken();
+          setCurrentUser(null);
+          setCurrentRole("VIEWER");
+          setAuthStatus("unauthenticated");
+          setAuthError(null);
+        } else {
+          // Recoverable network/server error: do not discard token permanently, show retry
+          setAuthStatus("error");
+          setAuthError("Unable to verify session. The server may be unavailable.");
+        }
+      }
+    }
+
+    checkSession();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleLoginSuccess = (user: User, token: string) => {
+    setCurrentUser(user);
+    setCurrentRole(user.role);
+    setAuthStatus("authenticated");
+    setAuthError(null);
+  };
+
+  const handleRetrySession = () => {
+    setAuthStatus("checking");
+    setAuthError(null);
+    (async () => {
+      const token = getStoredToken();
+      if (!token) {
+        setAuthStatus("unauthenticated");
+        return;
+      }
+      try {
+        const user = await api.getCurrentUser();
+        setCurrentUser(user);
+        setCurrentRole(user.role);
+        setAuthStatus("authenticated");
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const is401 = msg.includes("401") || msg.toLowerCase().includes("unauthorized");
+        if (is401) {
+          clearStoredToken();
+          setCurrentUser(null);
+          setCurrentRole("VIEWER");
+          setAuthStatus("unauthenticated");
+        } else {
+          setAuthStatus("error");
+          setAuthError("Still unable to verify session. Try again or sign in.");
+        }
+      }
+    })();
+  };
 
   const loadData = async () => {
     setIsRefreshing(true);
@@ -53,6 +149,27 @@ export function App() {
     setSelectedProductId(null);
   };
 
+  // Auth gating: don't render dashboard until session state is resolved
+  if (authStatus === "checking") {
+    return (
+      <div className="min-h-screen bg-[#F6F8FC] flex items-center justify-center text-slate-900">
+        <div className="flex flex-col items-center gap-3 text-sm font-medium text-slate-500">
+          <div className="w-8 h-8 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
+          <span>Verifying session...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (authStatus === "unauthenticated" || authStatus === "error") {
+    return (
+      <LoginPage
+        onLoginSuccess={handleLoginSuccess}
+        onCancel={authStatus === "error" ? () => { setAuthStatus("unauthenticated"); setAuthError(null); } : undefined}
+      />
+    );
+  }
+
   if (showLanding) {
     return (
       <LandingPage
@@ -69,11 +186,18 @@ export function App() {
     <AppShell
       activeTab={activeTab}
       onTabChange={setActiveTab}
-      currentRole={currentRole}
-      onRoleChange={setCurrentRole}
+      currentRole={currentUser ? currentUser.role : "VIEWER"}
       onRefresh={loadData}
       isRefreshing={isRefreshing}
       onOpenLanding={() => setShowLanding(true)}
+      onLogout={() => {
+        clearStoredToken();
+        setCurrentUser(null);
+        setCurrentRole("VIEWER");
+        setAuthStatus("unauthenticated");
+        setAuthError(null);
+      }}
+      userName={currentUser ? (currentUser.name || currentUser.username) : undefined}
     >
       {/* Active Tab Router */}
       {activeTab === "dashboard" && (

@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from functools import lru_cache
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, Header
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
@@ -13,7 +13,7 @@ from sqlalchemy import func, case
 from src.config.settings import settings
 from src.database.session import get_db
 from src.database.models import (
-    Product, Sale, Inventory, Forecast, InventoryRecommendation, ModelRun
+    Product, Sale, Inventory, Forecast, InventoryRecommendation, ModelRun, User, Session
 )
 from src.data.ingestion import load_and_prepare_data
 from src.data.validation import validate_dataset
@@ -27,6 +27,31 @@ from src.api.schemas import (
     LoginRequest, UserProfile
 )
 from src.utils.logger import logger
+
+
+from argon2 import PasswordHasher
+from secrets import token_urlsafe
+import hashlib
+ph = PasswordHasher()
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def _require_auth(db: Session = Depends(get_db), authorization: Optional[str] = Header(None)):
+    if not authorization:
+        create_error('UNAUTHORIZED', 'Authentication required.', 401)
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != 'bearer':
+        create_error('UNAUTHORIZED', 'Invalid authorization format.', 401)
+    raw_token = parts[1]
+    token_hash = _hash_token(raw_token)
+    session = db.query(Session).filter(Session.token_hash == token_hash).first()
+    if not session or session.revoked_at is not None or session.expires_at < datetime.utcnow():
+        create_error('UNAUTHORIZED', 'Session invalid, expired, or revoked.', 401)
+    user = db.query(User).filter(User.id == session.user_id).first()
+    if not user or not user.is_active:
+        create_error('UNAUTHORIZED', 'User account disabled.', 401)
+    return user
 
 router = APIRouter(prefix="/api/v1")
 
@@ -155,7 +180,9 @@ def get_product_detail(product_id: str, db: Session = Depends(get_db)):
     )
 
 @router.post("/products", response_model=ProductResponse, status_code=201)
-def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
+def create_product(payload: ProductCreate, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
+    if current_user.role not in ROLE_PERMISSIONS or "edit_products" not in ROLE_PERMISSIONS.get(current_user.role, []):
+        create_error("FORBIDDEN", "Insufficient permissions.", 403)
     existing = db.query(Product).filter(Product.product_code == payload.product_code).first()
     if existing:
         create_error("INVALID_REQUEST", f"Product code '{payload.product_code}' already exists.", 400)
@@ -194,7 +221,9 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
     )
 
 @router.put("/products/{product_id}", response_model=ProductResponse)
-def update_product(product_id: str, payload: ProductUpdate, db: Session = Depends(get_db)):
+def update_product(product_id: str, payload: ProductUpdate, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
+    if current_user.role not in ROLE_PERMISSIONS or "edit_products" not in ROLE_PERMISSIONS.get(current_user.role, []):
+        create_error("FORBIDDEN", "Insufficient permissions.", 403)
     prod = _get_product(db, product_id)
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"The requested product '{product_id}' does not exist.", 404)
@@ -228,7 +257,9 @@ def update_product(product_id: str, payload: ProductUpdate, db: Session = Depend
 # ----------------- Forecasts -----------------
 
 @router.post("/forecasts", response_model=ForecastResponse)
-def generate_forecast_endpoint(payload: ForecastRequest, db: Session = Depends(get_db)):
+def generate_forecast_endpoint(payload: ForecastRequest, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
+    if current_user.role not in ROLE_PERMISSIONS or "create_forecasts" not in ROLE_PERMISSIONS.get(current_user.role, []):
+        create_error("FORBIDDEN", "Insufficient permissions.", 403)
     prod = _get_product(db, payload.product_id)
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"Product '{payload.product_id}' not found.", 404)
@@ -458,10 +489,10 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
             "id": mr.id,
             "model_name": mr.model_name,
             "model_version": mr.model_version,
-            "MAE": mr.MAE,
-            "RMSE": mr.RMSE,
-            "MAPE": mr.MAPE,
-            "WAPE": mr.WAPE,
+            "mae": mr.mae,
+            "rmse": mr.rmse,
+            "mape": mr.mape,
+            "wape": mr.wape,
             "status": mr.status,
             "timestamp": mr.timestamp.isoformat()
         }
@@ -496,10 +527,10 @@ def list_models(db: Session = Depends(get_db)):
             "model_version": r.model_version,
             "status": r.status,
             "training_dates": r.training_dates,
-            "MAE": r.MAE,
-            "RMSE": r.RMSE,
-            "MAPE": r.MAPE,
-            "WAPE": r.WAPE,
+            "mae": r.mae,
+            "rmse": r.rmse,
+            "mape": r.mape,
+            "wape": r.wape,
             "timestamp": r.timestamp.isoformat(),
             "artifact_path": r.artifact_path,
             "all_model_comparisons": meta.get("all_model_comparisons", [])
@@ -516,10 +547,10 @@ def get_model_metrics(model_version: str, db: Session = Depends(get_db)):
         return {
             "model_name": run.model_name,
             "model_version": run.model_version,
-            "MAE": run.MAE,
-            "RMSE": run.RMSE,
-            "MAPE": run.MAPE,
-            "WAPE": run.WAPE,
+            "mae": run.mae,
+            "rmse": run.rmse,
+            "mape": run.mape,
+            "wape": run.wape,
             "status": run.status,
             "timestamp": run.timestamp.isoformat(),
             "hyperparameters": meta.get("hyperparameters", {}),
@@ -569,7 +600,9 @@ def train_model_endpoint(db: Session = Depends(get_db)):
         create_error("INTERNAL_SERVER_ERROR", f"Model training failed: {str(e)}", 500)
 
 @router.post("/models/{model_version}/promote")
-def promote_model(model_version: str, db: Session = Depends(get_db)):
+def promote_model(model_version: str, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
+    if current_user.role not in ROLE_PERMISSIONS or "manage_models" not in ROLE_PERMISSIONS.get(current_user.role, []):
+        create_error("FORBIDDEN", "Insufficient permissions.", 403)
     """Promotes a validated model version to production by swapping artifacts."""
     run = db.query(ModelRun).filter(ModelRun.model_version == model_version).first()
     if not run:
@@ -660,46 +693,56 @@ def get_drift_report(db: Session = Depends(get_db)):
 # ----------------- Auth -----------------
 
 ROLE_PERMISSIONS = {
-    "ADMIN": ["view_all", "edit_products", "train_models", "manage_system", "manage_users"],
-    "DATA_SCIENTIST": ["view_all", "train_models", "evaluate_models", "manage_models"],
+    "ADMIN": ["view_all", "edit_products", "train_models", "manage_system", "manage_users", "create_forecasts"],
+    "DATA_SCIENTIST": ["view_all", "train_models", "evaluate_models", "manage_models", "create_forecasts"],
     "INVENTORY_MANAGER": ["view_all", "view_forecasts", "manage_inventory", "view_recommendations"],
     "OPERATIONS_MANAGER": ["view_all", "view_recommendations", "export_orders"],
-    "ANALYST": ["view_all", "view_analytics", "view_performance"],
+    "ANALYST": ["view_all", "view_analytics", "view_performance", "create_forecasts"],
     "VIEWER": ["view_all"]
 }
 
 @router.post("/auth/login", response_model=UserProfile)
-def login(payload: LoginRequest):
-    # Simulated auth against standard role accounts
-    role_accounts = {
-        "admin": ("Administrator", "ADMIN"),
-        "datascientist": ("Dr. Elena Vance (Lead ML)", "DATA_SCIENTIST"),
-        "inventory": ("Marcus Chen (Inventory Lead)", "INVENTORY_MANAGER"),
-        "analyst": ("Sarah Jenkins (Senior Analyst)", "ANALYST"),
-        "operations": ("David Miller (Operations Dir)", "OPERATIONS_MANAGER"),
-        "viewer": ("Guest Viewer", "VIEWER"),
-    }
+def login(payload: LoginRequest, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.username == payload.username).first()
+    if not user or not user.is_active:
+        create_error("INVALID_CREDENTIALS", "Invalid username or password.", 401)
+    try:
+        if not ph.verify(user.password_hash, payload.password):
+            create_error("INVALID_CREDENTIALS", "Invalid username or password.", 401)
+    except Exception:
+        create_error("INVALID_CREDENTIALS", "Invalid username or password.", 401)
 
-    username_lower = payload.username.lower()
-    if username_lower in role_accounts and payload.password:
-        name, role = role_accounts[username_lower]
-        return UserProfile(
-            id=f"usr_{username_lower}",
-            username=payload.username,
-            name=name,
-            role=role,
-            token=f"demandiq_jwt_token_{username_lower}_{int(time.time())}"
-        )
+    raw_token = f"demandiq_jwt_token_{user.username}_{int(time.time())}"
+    token_hash = _hash_token(raw_token)
+    session = Session(
+        user_id=user.id,
+        token_hash=token_hash,
+        expires_at=datetime.utcnow() + timedelta(days=7)
+    )
+    db.add(session)
+    db.commit()
 
-    # Reject unknown credentials — no silent admin fallback in production
-    create_error("INVALID_CREDENTIALS", "Invalid username or password.", 401)
+    return UserProfile(
+        id=str(user.id),
+        username=user.username,
+        name=user.username,
+        role=user.role,
+        token=raw_token
+    )
 
 @router.get("/auth/me", response_model=UserProfile)
-def get_current_user():
-    return UserProfile(
-        id="usr_admin",
-        username="admin",
-        name="Administrator",
-        role="ADMIN",
-        token="demandiq_jwt_token_active"
-    )
+def get_current_user(db: Session = Depends(get_db), authorization: Optional[str] = Header(None)):
+    if not authorization:
+        create_error("UNAUTHORIZED", "Authentication required.", 401)
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != "bearer":
+        create_error("UNAUTHORIZED", "Invalid authorization format.", 401)
+    raw_token = parts[1]
+    token_hash = _hash_token(raw_token)
+    session = db.query(Session).filter(Session.token_hash == token_hash).first()
+    if not session or session.revoked_at is not None or session.expires_at < datetime.utcnow():
+        create_error("UNAUTHORIZED", "Session invalid, expired, or revoked.", 401)
+    user = db.query(User).filter(User.id == session.user_id).first()
+    if not user or not user.is_active:
+        create_error("UNAUTHORIZED", "User account disabled.", 401)
+    return UserProfile(id=str(user.id), username=user.username, name=user.username, role=user.role, token=raw_token)

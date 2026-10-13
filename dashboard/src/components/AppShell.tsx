@@ -38,10 +38,11 @@ interface AppShellProps {
   activeTab: NavTab;
   onTabChange: (tab: NavTab) => void;
   currentRole: UserRole;
-  onRoleChange: (role: UserRole) => void;
   onRefresh: () => void;
   isRefreshing: boolean;
   onOpenLanding: () => void;
+  onLogout?: () => void;
+  userName?: string;
   children: React.ReactNode;
 }
 
@@ -49,10 +50,11 @@ export const AppShell: React.FC<AppShellProps> = ({
   activeTab,
   onTabChange,
   currentRole,
-  onRoleChange,
   onRefresh,
   isRefreshing,
   onOpenLanding,
+  onLogout,
+  userName,
   children,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -143,49 +145,24 @@ export const AppShell: React.FC<AppShellProps> = ({
           </button>
         </div>
 
-        {/* User Role Footer */}
+        {/* Authenticated User Profile + Logout */}
         <div className="p-3 border-t border-slate-100 relative">
-          <button
-            onClick={() => setRoleMenuOpen(!roleMenuOpen)}
-            className="w-full flex items-center justify-between p-2 rounded-xl hover:bg-slate-100/70 transition-all text-left"
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center font-bold text-xs text-slate-700">
-                {activeRoleData.name.charAt(0)}
-              </div>
-              <div className="overflow-hidden">
-                <p className="text-xs font-bold text-slate-900 truncate">{activeRoleData.name}</p>
-                <p className="text-[10px] text-blue-600 font-semibold truncate">{activeRoleData.role}</p>
-              </div>
+          <div className="flex items-center gap-2.5 p-2 rounded-xl bg-slate-50/70 border border-slate-100">
+            <div className="w-8 h-8 rounded-full bg-blue-600 text-white flex items-center justify-center font-bold text-xs shadow-sm shadow-blue-500/20">
+              {currentRole?.charAt(0) || "U"}
             </div>
-            <ChevronDown className="w-3.5 h-3.5 text-slate-600" />
-          </button>
-
-          {/* Role Dropdown */}
-          {roleMenuOpen && (
-            <div className="absolute bottom-16 left-3 right-3 bg-white rounded-2xl shadow-xl border border-slate-200 p-2 z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
-              <p className="px-2 py-1 text-[10px] font-bold text-slate-600 uppercase tracking-wider">
-                Switch Role Profile
-              </p>
-              {roles.map((r) => (
-                <button
-                  key={r.role}
-                  onClick={() => {
-                    onRoleChange(r.role);
-                    setRoleMenuOpen(false);
-                  }}
-                  className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-medium flex items-center justify-between transition-colors ${
-                    currentRole === r.role ? "bg-blue-50 text-blue-700 font-bold" : "text-slate-700 hover:bg-slate-50"
-                  }`}
-                >
-                  <div>
-                    <p>{r.name}</p>
-                    <p className="text-[10px] text-slate-600">{r.role}</p>
-                  </div>
-                  {currentRole === r.role && <UserCheck className="w-3.5 h-3.5 text-blue-600" />}
-                </button>
-              ))}
+            <div className="overflow-hidden flex-1 min-w-0">
+              <p className="text-xs font-bold text-slate-900 truncate">{userName || currentRole || "User"}</p>
+              <p className="text-[10px] text-blue-600 font-semibold truncate">{currentRole || "VIEWER"}</p>
             </div>
+          </div>
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              className="mt-2 w-full text-xs font-bold text-rose-600 hover:text-rose-700 hover:bg-rose-50 rounded-lg py-2 border border-rose-200/60 transition-colors text-center"
+            >
+              Sign Out
+            </button>
           )}
         </div>
       </aside>

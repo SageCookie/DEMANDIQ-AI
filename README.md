@@ -22,6 +22,53 @@ DemandIQ AI shares the same **luminous glassmorphism, typography precision, and 
 
 ---
 
+## Development Setup
+
+### Prerequisites
+- Python 3.11+
+- PostgreSQL 15 (containerized via `docker-compose.yml`)
+- Node.js (for dashboard build)
+
+### Environment
+Copy `.env.example` to `.env` and set `DATABASE_URL=` pointing to the Docker Postgres service (`demandiq-user:...@postgres:5432/demandiq`). Do not commit `.env`.
+
+### Database & Migrations
+```bash
+# Apply migrations (use container env; do not hardcode credentials)
+alembic upgrade head
+```
+The current production revision is `2b7a91f8e3d1`. The previous base is `c48bc7184d59`.
+
+### Admin creation
+```bash
+python scripts/create_first_admin.py
+```
+
+### Run services
+```bash
+docker-compose up -d postgres api
+# Dashboard optionally
+# docker-compose up -d dashboard
+```
+
+### Health / Status
+- `/api/v1/system/status`
+- `/api/v1/auth/me` (authenticated)
+- `/api/v1/models`
+
+### Authentication
+Role-based access (`VIEWER`, `EDITOR`, `ADMIN`). Token-based session auth via `Session` table; password hashed with bcrypt. Admin creation is script-based; no hardcoded admin fallback remains.
+
+### Testing
+```bash
+pytest tests/unit/test_auth.py
+```
+
+### Backup
+A custom backup `demandiq_backup_2026-10-13.dump` exists; do not stage it.
+
+---
+
 ## 2. Core Architecture & Workflow
 
 ```

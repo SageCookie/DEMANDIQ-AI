@@ -1,0 +1,17 @@
+CREATE TABLE IF NOT EXISTS products (id SERIAL PRIMARY KEY, product_code VARCHAR(50) NOT NULL UNIQUE, product_name VARCHAR(200) NOT NULL, category VARCHAR(100) NOT NULL, unit_price FLOAT NOT NULL DEFAULT 0.0, lead_time_days FLOAT NOT NULL DEFAULT 7.0, active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS ix_products_product_code ON products(product_code);
+CREATE INDEX IF NOT EXISTS ix_products_category ON products(category);
+CREATE INDEX IF NOT EXISTS ix_products_active ON products(active);
+CREATE TABLE IF NOT EXISTS sales (id SERIAL PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id), sale_date TIMESTAMP NOT NULL, quantity_sold FLOAT NOT NULL DEFAULT 0.0, unit_price FLOAT NOT NULL DEFAULT 0.0, revenue FLOAT NOT NULL DEFAULT 0.0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_sales_product_date ON sales(product_id, sale_date);
+CREATE TABLE IF NOT EXISTS inventory (id SERIAL PRIMARY KEY, product_id INTEGER NOT NULL UNIQUE REFERENCES products(id), quantity_available FLOAT NOT NULL DEFAULT 0.0, quantity_reserved FLOAT NOT NULL DEFAULT 0.0, quantity_on_order FLOAT NOT NULL DEFAULT 0.0, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS forecasts (id SERIAL PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id), forecast_date TIMESTAMP NOT NULL, predicted_demand FLOAT NOT NULL, lower_bound FLOAT, upper_bound FLOAT, model_version VARCHAR(50) NOT NULL, generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS idx_forecast_product_date ON forecasts(product_id, forecast_date);
+CREATE TABLE IF NOT EXISTS inventory_recommendations (id SERIAL PRIMARY KEY, product_id INTEGER NOT NULL REFERENCES products(id), current_inventory FLOAT NOT NULL, forecast_demand FLOAT NOT NULL, lead_time_demand FLOAT NOT NULL, safety_stock FLOAT NOT NULL, reorder_point FLOAT NOT NULL, recommended_quantity FLOAT NOT NULL, stockout_risk VARCHAR(20) NOT NULL, recommendation VARCHAR(50) NOT NULL, explanation TEXT, generated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS ix_inv_rec_stockout_risk ON inventory_recommendations(stockout_risk);
+CREATE INDEX IF NOT EXISTS ix_inv_rec_generated_at ON inventory_recommendations(generated_at);
+CREATE TABLE IF NOT EXISTS model_runs (id SERIAL PRIMARY KEY, model_name VARCHAR(100) NOT NULL, model_version VARCHAR(50) NOT NULL UNIQUE, training_dates VARCHAR(100), MAE FLOAT NOT NULL, RMSE FLOAT NOT NULL, MAPE FLOAT NOT NULL, WAPE FLOAT, status VARCHAR(20) DEFAULT 'PRODUCTION', timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP, artifact_path VARCHAR(500) NOT NULL);
+CREATE TABLE IF NOT EXISTS users (id SERIAL PRIMARY KEY, username VARCHAR(50) NOT NULL UNIQUE, email VARCHAR(200), password_hash VARCHAR(255) NOT NULL, role VARCHAR(20) NOT NULL DEFAULT 'VIEWER', is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS ix_users_username ON users(username);
+CREATE TABLE IF NOT EXISTS sessions (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), token_hash VARCHAR(64) NOT NULL, expires_at TIMESTAMP NOT NULL, revoked_at TIMESTAMP, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE INDEX IF NOT EXISTS ix_sessions_token_hash ON sessions(token_hash);
