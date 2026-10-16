@@ -10,18 +10,20 @@ import {
   Info,
   CheckCircle2,
 } from "lucide-react";
-import { InventoryRecommendation, Product } from "../types";
+import { InventoryRecommendation, Product, UserRole } from "../types";
 
 interface InventoryOptimizationPageProps {
   recommendations: InventoryRecommendation[];
   products: Product[];
   onSelectProduct: (productId: string) => void;
+  currentRole: UserRole;
 }
 
 export const InventoryOptimizationPage: React.FC<InventoryOptimizationPageProps> = ({
   recommendations,
   products,
   onSelectProduct,
+  currentRole,
 }) => {
   // What-If Simulator State
   const [simProductCode, setSimProductCode] = useState<string>(products[0]?.product_code || "P001");
@@ -237,6 +239,11 @@ export const InventoryOptimizationPage: React.FC<InventoryOptimizationPageProps>
       </div>
 
       {/* Complete Recommendations Table */}
+      {recommendations.length === 0 && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 p-5 text-sm text-blue-900">
+          No current recommendations are available. Train a model or load sales data to generate replenishment decisions; you can still select a product above to model a scenario.
+        </div>
+      )}
       <div className="card p-6 space-y-4">
         <h3 className="text-sm font-extrabold text-slate-900">Active Inventory Optimization Roster</h3>
         <div className="overflow-x-auto border border-slate-200/80 rounded-xl">

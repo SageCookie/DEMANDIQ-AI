@@ -1,8 +1,8 @@
 {
   "model_name": "Random Forest",
-  "model_version": "v1.54951",
+  "model_version": "v1.34383",
   "status": "PRODUCTION",
-  "training_date": "2026-10-08 15:52:31",
+  "training_date": "2026-10-16 07:06:24",
   "dataset_version": "1.0.0",
   "feature_version": "1.0.0",
   "features_used": [
@@ -36,7 +36,7 @@
     "MAPE": 23.54,
     "WAPE": 17.57,
     "sMAPE": 23.18,
-    "training_time_ms": 177.61
+    "training_time_ms": 193.18
   },
   "validation_metrics": {
     "MAE": 4.1067,
@@ -44,7 +44,7 @@
     "MAPE": 20.76,
     "WAPE": 16.48,
     "sMAPE": 21.63,
-    "training_time_ms": 164.4,
+    "training_time_ms": 165.25,
     "model_name": "Random Forest"
   },
   "all_model_comparisons": [
@@ -54,7 +54,7 @@
       "MAPE": 64.14,
       "WAPE": 31.85,
       "sMAPE": 36.87,
-      "training_time_ms": 13.16,
+      "training_time_ms": 15.94,
       "model_name": "Naive Forecast"
     },
     {
@@ -63,7 +63,7 @@
       "MAPE": 53.91,
       "WAPE": 27.1,
       "sMAPE": 36.08,
-      "training_time_ms": 15.05,
+      "training_time_ms": 15.44,
       "model_name": "Moving Average"
     },
     {
@@ -72,7 +72,7 @@
       "MAPE": 75.26,
       "WAPE": 41.75,
       "sMAPE": 54.78,
-      "training_time_ms": 18.62,
+      "training_time_ms": 16.34,
       "model_name": "Seasonal Naive"
     },
     {
@@ -81,7 +81,7 @@
       "MAPE": 24.6,
       "WAPE": 16.95,
       "sMAPE": 23.11,
-      "training_time_ms": 32.15,
+      "training_time_ms": 16.28,
       "model_name": "Linear Regression"
     },
     {
@@ -90,16 +90,16 @@
       "MAPE": 20.76,
       "WAPE": 16.48,
       "sMAPE": 21.63,
-      "training_time_ms": 164.4,
+      "training_time_ms": 165.25,
       "model_name": "Random Forest"
     },
     {
-      "MAE": 4.1988,
-      "RMSE": 6.1666,
-      "MAPE": 20.92,
-      "WAPE": 16.85,
-      "sMAPE": 21.75,
-      "training_time_ms": 138.92,
+      "MAE": 4.171,
+      "RMSE": 6.1193,
+      "MAPE": 21.05,
+      "WAPE": 16.74,
+      "sMAPE": 21.87,
+      "training_time_ms": 706.81,
       "model_name": "XGBoost"
     }
   ],
@@ -123,6 +123,6 @@
     "verbose": 0,
     "warm_start": false
   },
-  "artifact_path": "models\\production\\demand_model.joblib",
-  "last_updated": "2026-10-08T15:52:31Z"
+  "artifact_path": "/app/models/production/demand_model.joblib",
+  "last_updated": "2026-10-16T07:06:24Z"
 }

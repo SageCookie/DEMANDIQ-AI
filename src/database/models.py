@@ -22,6 +22,8 @@ class Product(Base):
     inventory = relationship("Inventory", back_populates="product", uselist=False, cascade="all, delete-orphan")
     forecasts = relationship("Forecast", back_populates="product", cascade="all, delete-orphan")
     recommendations = relationship("InventoryRecommendation", back_populates="product", cascade="all, delete-orphan")
+    inventory_transactions = relationship("InventoryTransaction", back_populates="product", cascade="all, delete-orphan")
+    purchase_orders = relationship("PurchaseOrder", back_populates="product", cascade="all, delete-orphan")
 
 class Sale(Base):
     __tablename__ = "sales"
@@ -88,6 +90,38 @@ class InventoryRecommendation(Base):
 
     product = relationship("Product", back_populates="recommendations")
 
+
+class InventoryTransaction(Base):
+    __tablename__ = "inventory_transactions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    quantity_delta = Column(Float, nullable=False)
+    quantity_before = Column(Float, nullable=False)
+    quantity_after = Column(Float, nullable=False)
+    reason = Column(String(50), nullable=False)
+    note = Column(Text, nullable=True)
+    created_by = Column(String(50), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    product = relationship("Product", back_populates="inventory_transactions")
+
+
+class PurchaseOrder(Base):
+    __tablename__ = "purchase_orders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    order_number = Column(String(50), unique=True, nullable=False, index=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False, index=True)
+    quantity = Column(Float, nullable=False)
+    status = Column(String(20), nullable=False, default="DRAFT", index=True)
+    expected_arrival_date = Column(DateTime, nullable=True)
+    note = Column(Text, nullable=True)
+    created_by = Column(String(50), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+    product = relationship("Product", back_populates="purchase_orders")
+
 class ModelRun(Base):
     __tablename__ = "model_runs"
 
@@ -102,6 +136,21 @@ class ModelRun(Base):
     status = Column(String(20), default="PRODUCTION", index=True)
     timestamp = Column(DateTime, default=datetime.utcnow)
     artifact_path = Column(String(500), nullable=False)
+
+
+class TrainingJob(Base):
+    __tablename__ = "training_jobs"
+
+    id = Column(String(36), primary_key=True)
+    status = Column(String(20), nullable=False, default="QUEUED", index=True)
+    progress = Column(Integer, nullable=False, default=0)
+    message = Column(String(500), nullable=False, default="Queued for training")
+    requested_by = Column(String(50), nullable=False)
+    model_version = Column(String(50), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
 
 class User(Base):
     __tablename__ = "users"

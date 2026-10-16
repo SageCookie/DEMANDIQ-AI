@@ -21,17 +21,19 @@ import {
   ResponsiveContainer,
   Legend,
 } from "recharts";
-import { Product, ForecastResponse, ForecastItem } from "../types";
+import { Product, ForecastResponse, UserRole } from "../types";
 import { api } from "../lib/api";
 
 interface DemandForecastingPageProps {
   products: Product[];
   initialProductId?: string;
+  currentRole: UserRole;
 }
 
 export const DemandForecastingPage: React.FC<DemandForecastingPageProps> = ({
   products,
   initialProductId,
+  currentRole,
 }) => {
   const [selectedProductId, setSelectedProductId] = useState<string>(
     initialProductId || products[0]?.product_code || "P001"
@@ -40,6 +42,7 @@ export const DemandForecastingPage: React.FC<DemandForecastingPageProps> = ({
   const [forecastData, setForecastData] = useState<ForecastResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const canGenerateForecast = ["ADMIN", "DATA_SCIENTIST", "ANALYST"].includes(currentRole);
 
   useEffect(() => {
     if (initialProductId) {
@@ -48,7 +51,7 @@ export const DemandForecastingPage: React.FC<DemandForecastingPageProps> = ({
   }, [initialProductId]);
 
   const loadForecast = async () => {
-    if (!selectedProductId) return;
+    if (!selectedProductId || !canGenerateForecast) return;
     setLoading(true);
     setError(null);
     try {
@@ -62,8 +65,8 @@ export const DemandForecastingPage: React.FC<DemandForecastingPageProps> = ({
   };
 
   useEffect(() => {
-    loadForecast();
-  }, [selectedProductId, horizonDays]);
+    if (canGenerateForecast) loadForecast();
+  }, [selectedProductId, horizonDays, canGenerateForecast]);
 
   // Combine historical and forecasted series for charts
   const chartData = React.useMemo(() => {
@@ -166,7 +169,7 @@ export const DemandForecastingPage: React.FC<DemandForecastingPageProps> = ({
 
         {/* Actions & Metadata */}
         <div className="flex items-center gap-3 self-end md:self-auto">
-          <button onClick={loadForecast} disabled={loading} className="btn-secondary">
+          <button onClick={loadForecast} disabled={loading || !canGenerateForecast} title={!canGenerateForecast ? "Your role cannot generate forecasts" : undefined} className="btn-secondary disabled:opacity-50 disabled:cursor-not-allowed">
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
             <span>Generate</span>
           </button>
@@ -176,6 +179,12 @@ export const DemandForecastingPage: React.FC<DemandForecastingPageProps> = ({
           </button>
         </div>
       </div>
+
+      {!canGenerateForecast && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          Forecast generation requires an Administrator, Data Scientist, or Analyst account. You can still review saved forecasts in Forecast History.
+        </div>
+      )}
 
       {/* Summary Row */}
       {selectedProduct && forecastData && (

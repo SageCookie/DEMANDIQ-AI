@@ -59,7 +59,10 @@ demandiq_backup_*.dump
 
 # Generated experiment artifacts (not source)
 models/experiments/*.joblib
+models/experiments/*.json
 # Local test DB
 test_auth.db
 # Alembic SQLite fallback (if any local copy)
 alembic.ini.bak
+# TypeScript build cache
+*.tsbuildinfo

@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import List, Optional, Any, Dict
 from pydantic import BaseModel, Field
 
@@ -72,6 +73,17 @@ class InventoryRecommendationItem(BaseModel):
     overstock_status: str
     recommendation: str
     explanation: Optional[str] = None
+
+class InventoryAdjustmentRequest(BaseModel):
+    quantity_delta: float = Field(ne=0, ge=-1000000, le=1000000)
+    reason: str = Field(min_length=2, max_length=50)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+class PurchaseOrderCreate(BaseModel):
+    product_id: str
+    quantity: float = Field(gt=0, le=1000000)
+    expected_arrival_date: Optional[datetime] = None
+    note: Optional[str] = Field(default=None, max_length=500)
 
 class DashboardSummaryResponse(BaseModel):
     kpis: Dict[str, Any]

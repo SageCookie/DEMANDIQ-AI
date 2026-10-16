@@ -43,6 +43,11 @@ The current production revision is `2b7a91f8e3d1`. The previous base is `c48bc71
 ```bash
 python scripts/create_first_admin.py
 ```
+For Render, set `INITIAL_ADMIN_USERNAME` and `INITIAL_ADMIN_PASSWORD` in the
+service environment. The startup command applies Alembic migrations and
+creates that administrator automatically when no administrator exists; no
+Render shell access is required. Remove the password variable after the first
+successful deployment.
 
 ### Run services
 ```bash
@@ -241,7 +246,8 @@ python scripts/train_model.py
 ```bash
 uvicorn src.api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
-API Documentation will be live at: `http://localhost:8000/docs`
+API Documentation will be live at: `http://localhost:8000/docs` when running locally,
+or `http://localhost:5173/docs` through Docker Compose.
 
 ### 5. Start the Frontend Dashboard
 ```bash
@@ -303,7 +309,7 @@ docker-compose up -d --build
 
 Services:
 - **`postgres`**: Production PostgreSQL 15 database (`5432:5432`)
-- **`api`**: FastAPI REST service with live model loading (`8000:8000`)
+- **`api`**: FastAPI REST service with live model loading (private to the Compose network)
 - **`dashboard`**: Nginx container serving compiled React dashboard (`5173:80`)
 
 ---

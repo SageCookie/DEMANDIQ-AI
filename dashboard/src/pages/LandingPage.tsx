@@ -15,9 +15,10 @@ import { DemandIntelligenceWorld } from "../components/DemandIntelligenceWorld";
 interface LandingPageProps {
   onEnterDashboard: () => void;
   onOpenForecasting: () => void;
+  onLogin: () => void;
 }
 
-export const LandingPage: React.FC<LandingPageProps> = ({ onEnterDashboard, onOpenForecasting }) => {
+export const LandingPage: React.FC<LandingPageProps> = ({ onEnterDashboard, onOpenForecasting, onLogin }) => {
   return (
     <div className="min-h-screen bg-[#F6F8FC] text-slate-900 flex flex-col selection:bg-blue-600 selection:text-white">
       {/* Top Navbar */}
@@ -44,8 +45,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onEnterDashboard, onOp
           >
             View Forecast Engine
           </button>
-          <button onClick={onEnterDashboard} className="btn-primary">
-            <span>Launch Platform</span>
+          <button onClick={onLogin} className="btn-primary">
+            <span>Sign In</span>
             <ArrowRight className="w-4 h-4" />
           </button>
         </div>
@@ -74,8 +75,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onEnterDashboard, onOp
             </p>
 
             <div className="flex flex-wrap items-center gap-3 pt-2">
-              <button onClick={onEnterDashboard} className="btn-primary text-sm px-6 py-3.5">
-                <span>Explore Demand Intelligence</span>
+              <button onClick={onLogin} className="btn-primary text-sm px-6 py-3.5">
+                <span>Sign In to Continue</span>
                 <ArrowRight className="w-4 h-4" />
               </button>
               <button onClick={onOpenForecasting} className="btn-secondary text-sm px-5 py-3.5">
@@ -173,8 +174,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ onEnterDashboard, onOp
       <footer className="mt-auto py-8 px-6 lg:px-16 border-t border-slate-200 bg-white flex flex-col sm:flex-row items-center justify-between text-xs text-slate-500">
         <p>© 2026 DemandIQ AI. Enterprise Demand & Inventory Optimization System.</p>
         <div className="flex gap-4 mt-2 sm:mt-0 font-medium">
-          <button onClick={onEnterDashboard} className="hover:text-blue-600">
-            Open Dashboard
+          <button onClick={onLogin} className="hover:text-blue-600">
+            Sign In
           </button>
           <span>•</span>
           <a href="/docs" target="_blank" className="hover:text-blue-600">

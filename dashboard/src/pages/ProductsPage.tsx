@@ -1,15 +1,16 @@
 import React, { useState } from "react";
 import { Plus, Search, Package, ArrowUpRight, DollarSign, Clock, Check, X } from "lucide-react";
-import { Product } from "../types";
+import { Product, UserRole } from "../types";
 import { api } from "../lib/api";
 
 interface ProductsPageProps {
   products: Product[];
   onSelectProduct: (productId: string) => void;
   onRefresh: () => void;
+  currentRole: UserRole;
 }
 
-export const ProductsPage: React.FC<ProductsPageProps> = ({ products, onSelectProduct, onRefresh }) => {
+export const ProductsPage: React.FC<ProductsPageProps> = ({ products, onSelectProduct, onRefresh, currentRole }) => {
   const [search, setSearch] = useState("");
   const [category, setCategory] = useState("ALL");
   const [showAddModal, setShowAddModal] = useState(false);
@@ -22,6 +23,7 @@ export const ProductsPage: React.FC<ProductsPageProps> = ({ products, onSelectPr
     initial_inventory: 100,
   });
   const [submitting, setSubmitting] = useState(false);
+  const canManageProducts = currentRole === "ADMIN";
 
   const categories = Array.from(new Set(products.map((p) => p.category)));
 
@@ -81,12 +83,16 @@ export const ProductsPage: React.FC<ProductsPageProps> = ({ products, onSelectPr
             ))}
           </select>
 
-          <button onClick={() => setShowAddModal(true)} className="btn-primary">
+          <button onClick={() => setShowAddModal(true)} disabled={!canManageProducts} title={!canManageProducts ? "Only administrators can add products" : undefined} className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed">
             <Plus className="w-4 h-4" />
             <span>Add Product</span>
           </button>
         </div>
       </div>
+
+      {!canManageProducts && (
+        <p className="text-xs text-slate-500 -mt-3">Catalog editing is available to administrators. Your current role has read-only access.</p>
+      )}
 
       {/* Product Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">

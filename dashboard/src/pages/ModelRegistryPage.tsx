@@ -1,12 +1,21 @@
 import React, { useState, useEffect } from "react";
 import { Cpu, RefreshCw, CheckCircle2, Award, Zap, Clock, ShieldCheck, Play } from "lucide-react";
 import { api } from "../lib/api";
+import { UserRole } from "../types";
 
-export const ModelRegistryPage: React.FC = () => {
+interface ModelRegistryPageProps {
+  currentRole: UserRole;
+}
+
+export const ModelRegistryPage: React.FC<ModelRegistryPageProps> = ({ currentRole }) => {
   const [models, setModels] = useState<any[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [training, setTraining] = useState<boolean>(false);
   const [selectedModel, setSelectedModel] = useState<any | null>(null);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
+  const [activeJob, setActiveJob] = useState<any | null>(null);
+  const canTrain = ["ADMIN", "DATA_SCIENTIST"].includes(currentRole);
+  const canPromote = currentRole === "DATA_SCIENTIST";
 
   const fetchModels = async () => {
     setLoading(true);
@@ -25,26 +34,47 @@ export const ModelRegistryPage: React.FC = () => {
     fetchModels();
   }, []);
 
+  useEffect(() => {
+    if (!activeJob || ["SUCCEEDED", "FAILED"].includes(activeJob.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const job = await api.getTrainingJob(activeJob.id);
+        setActiveJob(job);
+        if (job.status === "SUCCEEDED") {
+          setActionMessage(`Training completed. Champion model: ${job.model_version}.`);
+          fetchModels();
+        } else if (job.status === "FAILED") {
+          setActionMessage(job.error_message || "Training failed. Review the dataset and retry.");
+        }
+      } catch (err: any) {
+        setActionMessage(err.message || "Unable to retrieve training-job status.");
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [activeJob?.id, activeJob?.status]);
+
   const handleRetrain = async () => {
+    if (!canTrain) return;
     setTraining(true);
     try {
-      const res = await api.triggerTrain();
-      alert(`Model retraining completed! New champion model: ${res.champion_model} (${res.model_version})`);
-      fetchModels();
+      const job = await api.triggerTrain();
+      setActiveJob(job);
+      setActionMessage("Training queued. You can keep using the dashboard while the model is evaluated.");
     } catch (err: any) {
-      alert(err.message || "Retraining failed");
+      setActionMessage(err.message || "Retraining failed.");
     } finally {
       setTraining(false);
     }
   };
 
   const handlePromote = async (version: string) => {
+    if (!canPromote) return;
     try {
       await api.promoteModel(version);
-      alert(`Model version ${version} promoted to PRODUCTION.`);
+      setActionMessage(`Model version ${version} is now serving production traffic.`);
       fetchModels();
     } catch (err: any) {
-      alert(err.message || "Promotion failed");
+      setActionMessage(err.message || "Promotion failed.");
     }
   };
 
@@ -70,12 +100,25 @@ export const ModelRegistryPage: React.FC = () => {
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
             <span>Refresh</span>
           </button>
-          <button onClick={handleRetrain} disabled={training} className="btn-primary">
+          <button onClick={handleRetrain} disabled={training || !canTrain || Boolean(activeJob && !["SUCCEEDED", "FAILED"].includes(activeJob.status))} title={!canTrain ? "Your role cannot retrain models" : undefined} className="btn-primary disabled:opacity-50 disabled:cursor-not-allowed">
             <Play className={`w-3.5 h-3.5 ${training ? "animate-spin" : ""}`} />
-            <span>{training ? "Training ML Pipeline..." : "Retrain Pipeline"}</span>
+            <span>{training ? "Queueing Training..." : activeJob && !["SUCCEEDED", "FAILED"].includes(activeJob.status) ? "Training in Background" : "Retrain Pipeline"}</span>
           </button>
         </div>
       </div>
+
+      {!canTrain && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          Model retraining is available to Administrators and Data Scientists. Promotion is limited to Data Scientists.
+        </div>
+      )}
+      {actionMessage && <div role="status" className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">{actionMessage}</div>}
+      {activeJob && !["SUCCEEDED", "FAILED"].includes(activeJob.status) && (
+        <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3">
+          <div className="flex items-center justify-between text-xs font-bold text-blue-900"><span>{activeJob.message}</span><span>{activeJob.progress}%</span></div>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full rounded-full bg-blue-600 transition-all" style={{ width: `${activeJob.progress}%` }} /></div>
+        </div>
+      )}
 
       {/* Model Benchmark Comparison Table */}
       <div className="card p-6 space-y-4">
@@ -162,7 +205,7 @@ export const ModelRegistryPage: React.FC = () => {
                   </td>
                   <td className="py-3 px-4 font-mono text-[11px] text-slate-500">{m.timestamp || m.training_date}</td>
                   <td className="py-3 px-4 text-right">
-                    {m.status !== "PRODUCTION" ? (
+                    {m.status !== "PRODUCTION" && canPromote ? (
                       <button
                         onClick={() => handlePromote(m.model_version)}
                         className="btn-secondary text-[10px] py-1 px-2.5"

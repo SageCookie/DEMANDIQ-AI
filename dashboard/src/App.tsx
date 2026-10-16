@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { AppShell, NavTab } from "./components/AppShell";
 import { LandingPage } from "./pages/LandingPage";
 import { ExecutiveDashboard } from "./pages/ExecutiveDashboard";
@@ -17,6 +18,7 @@ import { LoginPage } from "./components/LoginPage";
 import { api, getStoredToken, clearStoredToken, onUnauthorized } from "./lib/api";
 
 export function App() {
+  const navigate = useNavigate();
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authStatus, setAuthStatus] = useState<"checking" | "authenticated" | "unauthenticated" | "error">("checking");
   const [authError, setAuthError] = useState<string | null>(null);
@@ -27,6 +29,7 @@ export function App() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [dataError, setDataError] = useState<string | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string | null>(null);
   const [forecastTargetProduct, setForecastTargetProduct] = useState<string>("P001");
 
@@ -90,6 +93,24 @@ export function App() {
     setCurrentRole(user.role);
     setAuthStatus("authenticated");
     setAuthError(null);
+    setShowLanding(false);
+    navigate("/dashboard", { replace: true });
+  };
+
+  const handleLogout = async () => {
+    try {
+      await api.logout();
+    } catch {
+      // Local sign-out still protects this browser if the service is offline.
+    } finally {
+      clearStoredToken();
+      setCurrentUser(null);
+      setCurrentRole("VIEWER");
+      setAuthStatus("unauthenticated");
+      setAuthError(null);
+      setShowLanding(true);
+      navigate("/", { replace: true });
+    }
   };
 
   const handleRetrySession = () => {
@@ -131,8 +152,10 @@ export function App() {
       ]);
       setSummary(sumRes);
       setProducts(prodRes);
-    } catch (err) {
+      setDataError(null);
+    } catch (err: unknown) {
       console.error("Error fetching data:", err);
+      setDataError("We could not load the latest demand data. Check that the API is running, then try again.");
     } finally {
       setLoading(false);
       setIsRefreshing(false);
@@ -143,6 +166,7 @@ export function App() {
     loadData();
   }, []);
 
+  const handleLoginClick = () => navigate("/login");
   const handleNavigateToForecast = (productId: string) => {
     setForecastTargetProduct(productId);
     setActiveTab("forecasting");
@@ -150,6 +174,9 @@ export function App() {
   };
 
   // Auth gating: don't render dashboard until session state is resolved
+  const isLoginRoute = window.location.pathname === "/login" || window.location.pathname === "/login/";
+  const isRootRoute = window.location.pathname === "/" || window.location.pathname === "";
+
   if (authStatus === "checking") {
     return (
       <div className="min-h-screen bg-[#F6F8FC] flex items-center justify-center text-slate-900">
@@ -161,11 +188,27 @@ export function App() {
     );
   }
 
-  if (authStatus === "unauthenticated" || authStatus === "error") {
+  if (authStatus === "unauthenticated" && !showLanding && isLoginRoute) {
+    return <LoginPage onLoginSuccess={handleLoginSuccess} onCancel={() => navigate("/", { replace: true })} />;
+  }
+  if (authStatus === "unauthenticated" && (isRootRoute || showLanding)) {
+    return (
+      <LandingPage
+        onLogin={handleLoginClick}
+        onEnterDashboard={() => setShowLanding(false)}
+        onOpenForecasting={() => { setShowLanding(false); setActiveTab("forecasting"); }}
+      />
+    );
+  }
+  if ((authStatus === "unauthenticated" || authStatus === "error") && isLoginRoute) {
     return (
       <LoginPage
         onLoginSuccess={handleLoginSuccess}
-        onCancel={authStatus === "error" ? () => { setAuthStatus("unauthenticated"); setAuthError(null); } : undefined}
+        onCancel={authStatus === "error" ? () => {
+          setAuthStatus("unauthenticated");
+          setAuthError(null);
+          navigate("/", { replace: true });
+        } : undefined}
       />
     );
   }
@@ -173,6 +216,7 @@ export function App() {
   if (showLanding) {
     return (
       <LandingPage
+        onLogin={handleLoginClick}
         onEnterDashboard={() => setShowLanding(false)}
         onOpenForecasting={() => {
           setShowLanding(false);
@@ -190,15 +234,15 @@ export function App() {
       onRefresh={loadData}
       isRefreshing={isRefreshing}
       onOpenLanding={() => setShowLanding(true)}
-      onLogout={() => {
-        clearStoredToken();
-        setCurrentUser(null);
-        setCurrentRole("VIEWER");
-        setAuthStatus("unauthenticated");
-        setAuthError(null);
-      }}
+      onLogout={handleLogout}
       userName={currentUser ? (currentUser.name || currentUser.username) : undefined}
     >
+      {dataError && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-4 text-sm text-amber-900">
+          <span>{dataError}</span>
+          <button onClick={loadData} className="shrink-0 font-bold text-amber-800 hover:text-amber-950 underline">Retry</button>
+        </div>
+      )}
       {/* Active Tab Router */}
       {activeTab === "dashboard" && (
         <ExecutiveDashboard
@@ -213,6 +257,7 @@ export function App() {
         <DemandForecastingPage
           products={products}
           initialProductId={forecastTargetProduct}
+          currentRole={currentRole}
         />
       )}
 
@@ -221,6 +266,7 @@ export function App() {
           recommendations={summary?.recommendations || []}
           products={products}
           onSelectProduct={setSelectedProductId}
+          currentRole={currentRole}
         />
       )}
 
@@ -236,14 +282,15 @@ export function App() {
           products={products}
           onSelectProduct={setSelectedProductId}
           onRefresh={loadData}
+          currentRole={currentRole}
         />
       )}
 
       {activeTab === "history" && <ForecastHistoryPage />}
 
-      {activeTab === "models" && <ModelRegistryPage />}
+      {activeTab === "models" && <ModelRegistryPage currentRole={currentRole} />}
 
-      {activeTab === "data-quality" && <DataQualityPage />}
+      {activeTab === "data-quality" && <DataQualityPage currentRole={currentRole} onDataImported={loadData} />}
 
       {activeTab === "system-health" && <SystemHealthPage />}
 
@@ -254,6 +301,8 @@ export function App() {
         productId={selectedProductId}
         onClose={() => setSelectedProductId(null)}
         onNavigateToForecast={handleNavigateToForecast}
+        currentRole={currentRole}
+        onInventoryChanged={loadData}
       />
     </AppShell>
   );

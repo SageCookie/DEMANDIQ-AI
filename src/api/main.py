@@ -1,3 +1,5 @@
+import os
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,10 +10,33 @@ from src.config.settings import settings
 from src.api.routes import router
 from src.utils.logger import logger
 from src.database.session import Base, engine
+from src.database.session import SessionLocal
+from src.database.models import User
 
-# Initialize tables only in development. In production, use Alembic migrations.
+# Keep local development convenient while production schema changes remain
+# explicitly managed by Alembic.
 if settings.app_env == "development":
     Base.metadata.create_all(bind=engine)
+
+
+def _bootstrap_initial_admin() -> None:
+    """Create the first admin on a blank hosted database when explicitly configured."""
+    username = os.getenv("INITIAL_ADMIN_USERNAME", "").strip()
+    password = os.getenv("INITIAL_ADMIN_PASSWORD", "")
+    if not username or not password:
+        return
+    from argon2 import PasswordHasher
+    db = SessionLocal()
+    try:
+        if not db.query(User).filter(User.role == "ADMIN").first():
+            db.add(User(username=username, password_hash=PasswordHasher().hash(password), role="ADMIN", is_active=True))
+            db.commit()
+            logger.info("Created configured initial administrator '%s'.", username)
+    finally:
+        db.close()
+
+
+_bootstrap_initial_admin()
 
 app = FastAPI(
     title="DemandIQ AI",
@@ -21,8 +46,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
-# CORS setup — restrict to configured origins in production
-_cors_origins = settings.cors_origins if settings.app_env == "production" else settings.cors_origins + ["*"]
+# CORS setup. Credentials and a wildcard origin are incompatible and can expose
+# authenticated endpoints to an arbitrary site, so use the explicit allow-list
+# in every environment.
+_cors_origins = settings.cors_origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=_cors_origins,

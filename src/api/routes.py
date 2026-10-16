@@ -1,29 +1,30 @@
 import os
 import json
-import time
+import uuid
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
-from functools import lru_cache
-from fastapi import APIRouter, Depends, HTTPException, Query, status, Header
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status, Header, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
 
 from src.config.settings import settings
-from src.database.session import get_db
+from src.database.session import get_db, SessionLocal
 from src.database.models import (
-    Product, Sale, Inventory, Forecast, InventoryRecommendation, ModelRun, User, Session
+    Product, Sale, Inventory, Forecast, InventoryRecommendation, ModelRun, User, Session,
+    InventoryTransaction, PurchaseOrder, TrainingJob
 )
 from src.data.ingestion import load_and_prepare_data
 from src.data.validation import validate_dataset
+from src.data.cleaning import clean_sales_data
 from src.forecasting.engine import ForecastEngine
 from src.optimization.inventory import InventoryOptimizer
 from src.models.trainer import ModelTrainingPipeline
 from src.api.schemas import (
     ProductResponse, ProductCreate, ProductUpdate,
     ForecastRequest, ForecastResponse, ForecastItem,
-    InventoryRecommendationItem, DashboardSummaryResponse,
+    InventoryRecommendationItem, DashboardSummaryResponse, InventoryAdjustmentRequest, PurchaseOrderCreate,
     LoginRequest, UserProfile
 )
 from src.utils.logger import logger
@@ -53,10 +54,25 @@ def _require_auth(db: Session = Depends(get_db), authorization: Optional[str] = 
         create_error('UNAUTHORIZED', 'User account disabled.', 401)
     return user
 
+
+def _session_from_authorization(authorization: Optional[str], db: Session) -> Session:
+    """Resolve an active session from a Bearer header for session lifecycle actions."""
+    if not authorization:
+        create_error('UNAUTHORIZED', 'Authentication required.', 401)
+    parts = authorization.split()
+    if len(parts) != 2 or parts[0].lower() != 'bearer':
+        create_error('UNAUTHORIZED', 'Invalid authorization format.', 401)
+    session = db.query(Session).filter(Session.token_hash == _hash_token(parts[1])).first()
+    if not session or session.revoked_at is not None or session.expires_at < datetime.utcnow():
+        create_error('UNAUTHORIZED', 'Session invalid, expired, or revoked.', 401)
+    return session
+
 router = APIRouter(prefix="/api/v1")
 
 # Cache cleaned dataset keyed by file mtime to avoid re-parsing the CSV on every request.
 _cleaned_cache: Dict[str, Any] = {"df": None, "mtime": None}
+_pending_uploads: Dict[str, Path] = {}
+_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
 def _get_cleaned_data():
@@ -77,6 +93,55 @@ def invalidate_cleaned_cache():
     """Drop the cached cleaned dataset (call after retraining/re-ingestion)."""
     _cleaned_cache["df"] = None
     _cleaned_cache["mtime"] = None
+
+
+def _require_data_import_role(user: User) -> None:
+    if user.role not in {"ADMIN", "DATA_SCIENTIST"}:
+        create_error("FORBIDDEN", "Your role cannot import sales data.", 403)
+
+
+def _normalise_upload_columns(raw_df, default_inventory: float, default_lead_time: float):
+    """Map common transaction-export headers into DemandIQ's canonical schema."""
+    aliases = {
+        "date": {"date", "sale_date", "sales_date", "transaction_date"},
+        "product_id": {"product_id", "productid", "sku", "sku_id", "item_id"},
+        "product_name": {"product_name", "product", "item_name", "product_description"},
+        "category": {"category", "product_category", "productcategory"},
+        "quantity_sold": {"quantity_sold", "quantity", "units_sold", "units", "sales_quantity"},
+        "unit_price": {"unit_price", "price", "selling_price", "sales_price"},
+        "revenue": {"revenue", "sales_amount", "sales", "amount", "total_sales"},
+        "inventory_level": {"inventory_level", "inventory", "stock_level", "on_hand"},
+        "lead_time_days": {"lead_time_days", "lead_time", "lead_days", "supplier_lead_time"},
+    }
+    normalized = {str(column).strip().lower().replace(" ", "_"): column for column in raw_df.columns}
+    rename_map, applied = {}, {}
+    for canonical, options in aliases.items():
+        if canonical in raw_df.columns:
+            continue
+        source = next((normalized[option] for option in options if option in normalized), None)
+        if source:
+            rename_map[source] = canonical
+            applied[canonical] = source
+    df = raw_df.rename(columns=rename_map).copy()
+
+    generated = []
+    if "product_name" not in df.columns and "product_id" in df.columns:
+        df["product_name"] = "Product " + df["product_id"].astype(str)
+        generated.append("product_name")
+    if "inventory_level" not in df.columns:
+        df["inventory_level"] = default_inventory
+        generated.append("inventory_level")
+    else:
+        df["inventory_level"] = df["inventory_level"].fillna(default_inventory)
+    if "lead_time_days" not in df.columns:
+        df["lead_time_days"] = default_lead_time
+        generated.append("lead_time_days")
+    else:
+        df["lead_time_days"] = df["lead_time_days"].fillna(default_lead_time)
+    if "revenue" not in df.columns and {"quantity_sold", "unit_price"}.issubset(df.columns):
+        df["revenue"] = df["quantity_sold"] * df["unit_price"]
+        generated.append("revenue")
+    return df, applied, generated
 
 # Helper error response
 def create_error(code: str, message: str, status_code: int = 400):
@@ -101,6 +166,7 @@ def get_system_status(db: Session = Depends(get_db)):
     except Exception as e:
         db_status = f"ERROR: {str(e)}"
 
+    metadata: Dict[str, Any] = {}
     forecast_engine = ForecastEngine.get_instance()
     try:
         metadata = forecast_engine.get_metadata()
@@ -402,6 +468,80 @@ def get_product_optimization_details(product_id: str, db: Session = Depends(get_
         "explanation": rec.explanation if rec else "Inventory metrics within target limits.",
     }
 
+
+@router.post("/inventory/{product_id}/adjustments")
+def adjust_inventory(
+    product_id: str,
+    payload: InventoryAdjustmentRequest,
+    current_user=Depends(_require_auth),
+    db: Session = Depends(get_db),
+):
+    """Apply an audited physical-stock adjustment without allowing negative inventory."""
+    if current_user.role not in {"ADMIN", "INVENTORY_MANAGER"}:
+        create_error("FORBIDDEN", "Your role cannot adjust physical inventory.", 403)
+    product = _get_product(db, product_id)
+    if not product:
+        create_error("PRODUCT_NOT_FOUND", f"Product '{product_id}' not found.", 404)
+    inventory = db.query(Inventory).filter(Inventory.product_id == product.id).first()
+    if not inventory:
+        inventory = Inventory(product_id=product.id, quantity_available=0.0, quantity_reserved=0.0, quantity_on_order=0.0)
+        db.add(inventory)
+        db.flush()
+    before = float(inventory.quantity_available)
+    after = before + payload.quantity_delta
+    if after < 0:
+        create_error("INVALID_REQUEST", "This adjustment would make available inventory negative.", 400)
+    inventory.quantity_available = after
+    db.add(InventoryTransaction(
+        product_id=product.id,
+        quantity_delta=payload.quantity_delta,
+        quantity_before=before,
+        quantity_after=after,
+        reason=payload.reason.strip().upper(),
+        note=payload.note.strip() if payload.note else None,
+        created_by=current_user.username,
+    ))
+    db.commit()
+    return {"product_id": product.product_code, "quantity_before": before, "quantity_after": after, "quantity_delta": payload.quantity_delta}
+
+
+@router.get("/inventory/{product_id}/adjustments")
+def get_inventory_adjustments(product_id: str, db: Session = Depends(get_db)):
+    product = _get_product(db, product_id)
+    if not product:
+        create_error("PRODUCT_NOT_FOUND", f"Product '{product_id}' not found.", 404)
+    records = db.query(InventoryTransaction).filter(InventoryTransaction.product_id == product.id).order_by(InventoryTransaction.created_at.desc()).limit(50).all()
+    return [{"id": row.id, "quantity_delta": row.quantity_delta, "quantity_before": row.quantity_before, "quantity_after": row.quantity_after, "reason": row.reason, "note": row.note, "created_by": row.created_by, "created_at": row.created_at.isoformat()} for row in records]
+
+
+@router.post("/purchase-orders", status_code=status.HTTP_201_CREATED)
+def create_purchase_order(payload: PurchaseOrderCreate, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    if current_user.role not in {"ADMIN", "INVENTORY_MANAGER", "OPERATIONS_MANAGER"}:
+        create_error("FORBIDDEN", "Your role cannot create purchase orders.", 403)
+    product = _get_product(db, payload.product_id)
+    if not product:
+        create_error("PRODUCT_NOT_FOUND", f"Product '{payload.product_id}' not found.", 404)
+    inventory = db.query(Inventory).filter(Inventory.product_id == product.id).first()
+    if not inventory:
+        inventory = Inventory(product_id=product.id, quantity_available=0.0, quantity_reserved=0.0, quantity_on_order=0.0)
+        db.add(inventory)
+        db.flush()
+    order_number = f"PO-{datetime.utcnow():%Y%m%d}-{token_urlsafe(5).upper()}"
+    order = PurchaseOrder(order_number=order_number, product_id=product.id, quantity=payload.quantity, expected_arrival_date=payload.expected_arrival_date, note=payload.note.strip() if payload.note else None, created_by=current_user.username)
+    inventory.quantity_on_order += payload.quantity
+    db.add(order)
+    db.commit()
+    return {"id": order.id, "order_number": order.order_number, "product_id": product.product_code, "product_name": product.product_name, "quantity": order.quantity, "status": order.status, "expected_arrival_date": order.expected_arrival_date.isoformat() if order.expected_arrival_date else None, "created_at": order.created_at.isoformat()}
+
+
+@router.get("/purchase-orders")
+def list_purchase_orders(status_filter: Optional[str] = Query(default=None, alias="status"), db: Session = Depends(get_db)):
+    query = db.query(PurchaseOrder).join(Product)
+    if status_filter:
+        query = query.filter(PurchaseOrder.status == status_filter.upper())
+    orders = query.order_by(PurchaseOrder.created_at.desc()).limit(200).all()
+    return [{"id": order.id, "order_number": order.order_number, "product_id": order.product.product_code, "product_name": order.product.product_name, "quantity": order.quantity, "status": order.status, "expected_arrival_date": order.expected_arrival_date.isoformat() if order.expected_arrival_date else None, "created_by": order.created_by, "created_at": order.created_at.isoformat()} for order in orders]
+
 # ----------------- Dashboard Summary -----------------
 
 @router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
@@ -510,6 +650,55 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
 
 # ----------------- Models & Registry -----------------
 
+def _serialize_training_job(job: TrainingJob) -> Dict[str, Any]:
+    return {
+        "id": job.id, "status": job.status, "progress": job.progress,
+        "message": job.message, "requested_by": job.requested_by,
+        "model_version": job.model_version, "error_message": job.error_message,
+        "created_at": job.created_at.isoformat(),
+        "started_at": job.started_at.isoformat() if job.started_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+    }
+
+
+def _run_training_job(job_id: str) -> None:
+    """Run a training job outside the request lifecycle and persist every outcome."""
+    db = SessionLocal()
+    try:
+        job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+        if not job:
+            return
+        job.status, job.progress, job.message, job.started_at = "RUNNING", 10, "Preparing training data", datetime.utcnow()
+        db.commit()
+        trainer = ModelTrainingPipeline(settings.base_dir / "data" / "raw" / "historical_sales.csv")
+        job.progress, job.message = 35, "Evaluating forecast candidates"
+        db.commit()
+        meta = trainer.run()
+        job.progress, job.message = 90, "Saving champion model"
+        db.commit()
+        db.query(ModelRun).filter(ModelRun.status == "PRODUCTION").update({"status": "RETIRED"})
+        db.add(ModelRun(
+            model_name=meta["model_name"], model_version=meta["model_version"],
+            training_dates=f"Historical (latest: {meta['training_date']})",
+            mae=meta["test_metrics"]["MAE"], rmse=meta["test_metrics"]["RMSE"],
+            mape=meta["test_metrics"]["MAPE"], wape=meta["test_metrics"]["WAPE"],
+            status="PRODUCTION", artifact_path=meta["artifact_path"],
+        ))
+        job.status, job.progress, job.message = "SUCCEEDED", 100, "Model training completed"
+        job.model_version, job.completed_at = meta["model_version"], datetime.utcnow()
+        db.commit()
+        ForecastEngine.get_instance().reload()
+    except Exception as exc:
+        db.rollback()
+        job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+        if job:
+            job.status, job.progress, job.message = "FAILED", 100, "Model training failed"
+            job.error_message, job.completed_at = str(exc)[:2000], datetime.utcnow()
+            db.commit()
+        logger.exception("Training job %s failed", job_id)
+    finally:
+        db.close()
+
 @router.get("/models")
 def list_models(db: Session = Depends(get_db)):
     runs = db.query(ModelRun).order_by(ModelRun.timestamp.desc()).all()
@@ -562,42 +751,31 @@ def get_model_metrics(model_version: str, db: Session = Depends(get_db)):
 
     create_error("MODEL_NOT_FOUND", f"Model version '{model_version}' not found.", 404)
 
-@router.post("/models/train")
-def train_model_endpoint(db: Session = Depends(get_db)):
-    """Triggers model training, comparison and evaluation pipeline."""
-    try:
-        raw_data_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
-        trainer = ModelTrainingPipeline(raw_data_path)
-        meta = trainer.run()
+@router.post("/models/train", status_code=status.HTTP_202_ACCEPTED)
+def train_model_endpoint(background_tasks: BackgroundTasks, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    if current_user.role not in ROLE_PERMISSIONS or "train_models" not in ROLE_PERMISSIONS.get(current_user.role, []):
+        create_error("FORBIDDEN", "Insufficient permissions to train models.", 403)
+    active_job = db.query(TrainingJob).filter(TrainingJob.status.in_(["QUEUED", "RUNNING"])).first()
+    if active_job:
+        create_error("JOB_IN_PROGRESS", "A model training job is already running.", 409)
+    job = TrainingJob(id=str(uuid.uuid4()), requested_by=current_user.username)
+    db.add(job)
+    db.commit()
+    background_tasks.add_task(_run_training_job, job.id)
+    return _serialize_training_job(job)
 
-        # Update DB run
-        m_run = ModelRun(
-            model_name=meta["model_name"],
-            model_version=meta["model_version"],
-            training_dates=f"Historical (latest: {meta['training_date']})",
-            MAE=meta["test_metrics"]["MAE"],
-            RMSE=meta["test_metrics"]["RMSE"],
-            MAPE=meta["test_metrics"]["MAPE"],
-            WAPE=meta["test_metrics"]["WAPE"],
-            status="PRODUCTION",
-            artifact_path=meta["artifact_path"]
-        )
-        db.add(m_run)
-        db.commit()
 
-        # Reload engine cache
-        ForecastEngine.get_instance().reload()
+@router.get("/models/jobs")
+def list_training_jobs(db: Session = Depends(get_db)):
+    return [_serialize_training_job(job) for job in db.query(TrainingJob).order_by(TrainingJob.created_at.desc()).limit(20).all()]
 
-        return {
-            "status": "SUCCESS",
-            "message": f"Successfully trained and evaluated models. Selected {meta['model_name']} as champion.",
-            "champion_model": meta["model_name"],
-            "model_version": meta["model_version"],
-            "metrics": meta["test_metrics"],
-            "comparisons": meta["all_model_comparisons"]
-        }
-    except Exception as e:
-        create_error("INTERNAL_SERVER_ERROR", f"Model training failed: {str(e)}", 500)
+
+@router.get("/models/jobs/{job_id}")
+def get_training_job(job_id: str, db: Session = Depends(get_db)):
+    job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+    if not job:
+        create_error("JOB_NOT_FOUND", f"Training job '{job_id}' not found.", 404)
+    return _serialize_training_job(job)
 
 @router.post("/models/{model_version}/promote")
 def promote_model(model_version: str, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
@@ -639,6 +817,79 @@ def promote_model(model_version: str, current_user = Depends(_require_auth), db:
     }
 
 # ----------------- Data Quality -----------------
+
+@router.post("/data/upload/preview")
+async def preview_data_upload(
+    file: UploadFile = File(...),
+    default_inventory_level: float = Form(100.0, ge=0),
+    default_lead_time_days: float = Form(7.0, ge=1, le=365),
+    current_user=Depends(_require_auth),
+):
+    """Validate a CSV and stage it for an explicit, separate import confirmation."""
+    _require_data_import_role(current_user)
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        create_error("INVALID_REQUEST", "Please upload a CSV file.", 400)
+    content = await file.read()
+    if not content:
+        create_error("INVALID_REQUEST", "The uploaded file is empty.", 400)
+    if len(content) > _MAX_UPLOAD_BYTES:
+        create_error("INVALID_REQUEST", "Upload exceeds the 10 MB limit.", 400)
+
+    import io
+    import pandas as pd
+    try:
+        raw_df = pd.read_csv(io.BytesIO(content))
+    except Exception:
+        create_error("INVALID_REQUEST", "The file could not be read as a CSV dataset.", 400)
+
+    normalized_df, applied_mappings, generated_fields = _normalise_upload_columns(
+        raw_df, default_inventory_level, default_lead_time_days
+    )
+    is_valid, report = validate_dataset(normalized_df)
+    preview = {
+        "file_name": Path(file.filename).name,
+        "raw_records": len(raw_df),
+        "is_valid": is_valid,
+        "validation_report": report.to_dict(),
+        "applied_mappings": applied_mappings,
+        "generated_fields": generated_fields,
+    }
+    if is_valid:
+        clean_df, audit = clean_sales_data(normalized_df)
+        upload_id = str(uuid.uuid4())
+        pending_dir = settings.base_dir / "data" / "uploads" / "pending"
+        pending_dir.mkdir(parents=True, exist_ok=True)
+        pending_path = pending_dir / f"{upload_id}.csv"
+        pending_path.write_bytes(normalized_df.to_csv(index=False).encode("utf-8"))
+        _pending_uploads[upload_id] = pending_path
+        preview.update({"upload_id": upload_id, "cleaning_audit": audit.to_dict(), "normalized_records": len(clean_df)})
+    return preview
+
+
+@router.post("/data/upload/{upload_id}/confirm")
+def confirm_data_upload(upload_id: str, current_user=Depends(_require_auth)):
+    """Promote a previously previewed upload, preserving the last source CSV as a backup."""
+    _require_data_import_role(current_user)
+    pending_path = _pending_uploads.pop(upload_id, None)
+    if not pending_path or not pending_path.exists():
+        create_error("UPLOAD_NOT_FOUND", "This upload preview has expired. Upload the CSV again.", 404)
+    target_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if target_path.exists():
+        import shutil
+        history_dir = settings.base_dir / "data" / "uploads" / "history"
+        history_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(target_path, history_dir / f"historical_sales_{datetime.utcnow():%Y%m%d_%H%M%S}.csv")
+    os.replace(pending_path, target_path)
+    invalidate_cleaned_cache()
+    clean_df, report, audit = load_and_prepare_data(target_path)
+    return {
+        "status": "IMPORTED",
+        "message": "Dataset imported. Retrain the model to use the new history for future forecasts.",
+        "total_records": len(clean_df),
+        "validation_report": report.to_dict(),
+        "cleaning_audit": audit.to_dict(),
+    }
 
 @router.get("/data/quality")
 def get_data_quality():
@@ -712,8 +963,14 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     except Exception:
         create_error("INVALID_CREDENTIALS", "Invalid username or password.", 401)
 
-    raw_token = f"demandiq_jwt_token_{user.username}_{int(time.time())}"
+    # Tokens must be unguessable.  The database stores only a SHA-256 digest,
+    # so a database leak does not directly grant an active browser session.
+    raw_token = token_urlsafe(32)
     token_hash = _hash_token(raw_token)
+    # Keep the session table bounded and remove credentials that can never be used.
+    db.query(Session).filter(
+        (Session.expires_at < datetime.utcnow()) | (Session.revoked_at.isnot(None))
+    ).delete(synchronize_session=False)
     session = Session(
         user_id=user.id,
         token_hash=token_hash,
@@ -729,6 +986,15 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
         role=user.role,
         token=raw_token
     )
+
+
+@router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
+def logout(db: Session = Depends(get_db), authorization: Optional[str] = Header(None)):
+    """Revoke the current server-side session, making a copied token unusable."""
+    session = _session_from_authorization(authorization, db)
+    session.revoked_at = datetime.utcnow()
+    db.commit()
+    return None
 
 @router.get("/auth/me", response_model=UserProfile)
 def get_current_user(db: Session = Depends(get_db), authorization: Optional[str] = Header(None)):

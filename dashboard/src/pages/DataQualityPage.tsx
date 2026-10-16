@@ -1,11 +1,22 @@
 import React, { useState, useEffect } from "react";
-import { Database, CheckCircle2, AlertTriangle, FileText, ShieldCheck, RefreshCw } from "lucide-react";
-import { DataQualityReport } from "../types";
+import { Database, CheckCircle2, AlertTriangle, FileText, ShieldCheck, RefreshCw, Upload } from "lucide-react";
+import { DataQualityReport, UserRole } from "../types";
 import { api } from "../lib/api";
 
-export const DataQualityPage: React.FC = () => {
+interface DataQualityPageProps {
+  currentRole: UserRole;
+  onDataImported: () => void;
+}
+
+export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, onDataImported }) => {
   const [data, setData] = useState<DataQualityReport | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [preview, setPreview] = useState<any | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [defaultInventory, setDefaultInventory] = useState(100);
+  const [defaultLeadTime, setDefaultLeadTime] = useState(7);
+  const canImport = ["ADMIN", "DATA_SCIENTIST"].includes(currentRole);
 
   const loadData = () => {
     setLoading(true);
@@ -19,6 +30,34 @@ export const DataQualityPage: React.FC = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  const handlePreview = async (file?: File) => {
+    if (!file) return;
+    setUploading(true);
+    setPreview(null);
+    setMessage(null);
+    try {
+      const result = await api.previewDataUpload(file, defaultInventory, defaultLeadTime);
+      setPreview(result);
+      if (!result.is_valid) setMessage("This file needs correction before it can be imported.");
+    } catch (err: any) {
+      setMessage(err.message || "Unable to validate this file.");
+    } finally { setUploading(false); }
+  };
+
+  const handleConfirm = async () => {
+    if (!preview?.upload_id) return;
+    setUploading(true);
+    try {
+      const result = await api.confirmDataUpload(preview.upload_id);
+      setMessage(result.message);
+      setPreview(null);
+      loadData();
+      onDataImported();
+    } catch (err: any) {
+      setMessage(err.message || "Import could not be completed.");
+    } finally { setUploading(false); }
+  };
 
   if (loading || !data) {
     return (
@@ -54,6 +93,43 @@ export const DataQualityPage: React.FC = () => {
           <RefreshCw className="w-3.5 h-3.5" />
           <span>Re-validate</span>
         </button>
+      </div>
+
+      <div className="card p-6 space-y-4">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-extrabold text-slate-900">Import Sales Dataset</h3>
+            <p className="text-xs text-slate-500 mt-1">Common transaction exports are mapped automatically. Review validation results, then explicitly replace the active dataset. The previous source is backed up automatically.</p>
+          </div>
+          <label className={`btn-primary cursor-pointer ${!canImport || uploading ? "opacity-50 pointer-events-none" : ""}`}>
+            <Upload className="w-4 h-4" />
+            <span>{uploading ? "Checking file..." : "Choose CSV"}</span>
+            <input type="file" accept=".csv,text/csv" className="hidden" disabled={!canImport || uploading} onChange={(e) => handlePreview(e.target.files?.[0])} />
+          </label>
+        </div>
+        {!canImport && <p className="text-xs text-slate-500">Data import is available to Administrators and Data Scientists.</p>}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+          <label className="font-bold text-slate-700">Fallback inventory per SKU
+            <input type="number" min="0" value={defaultInventory} onChange={(e) => setDefaultInventory(Number(e.target.value))} disabled={!canImport || uploading} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal disabled:bg-slate-50" />
+          </label>
+          <label className="font-bold text-slate-700">Fallback supplier lead time (days)
+            <input type="number" min="1" max="365" value={defaultLeadTime} onChange={(e) => setDefaultLeadTime(Number(e.target.value))} disabled={!canImport || uploading} className="mt-1 w-full px-3 py-2 border border-slate-200 rounded-xl font-normal disabled:bg-slate-50" />
+          </label>
+        </div>
+        {message && <p role="status" className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-700">{message}</p>}
+        {preview && (
+          <div className={`rounded-xl border p-4 text-xs ${preview.is_valid ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
+            <div className="flex flex-wrap justify-between gap-2 font-bold text-slate-800">
+              <span>{preview.file_name}: {preview.raw_records.toLocaleString()} raw rows</span>
+              <span>{preview.is_valid ? "READY TO IMPORT" : "FIX REQUIRED"}</span>
+            </div>
+            <p className="mt-2 text-slate-600">Health score: {preview.validation_report.health_score} · Products: {preview.validation_report.product_count} · Normalized rows: {preview.normalized_records ?? "—"}</p>
+            {Object.keys(preview.applied_mappings || {}).length > 0 && <p className="mt-2 text-slate-600">Mapped: {Object.entries(preview.applied_mappings).map(([target, source]) => `${source} → ${target}`).join(", ")}</p>}
+            {preview.generated_fields?.length > 0 && <p className="mt-2 text-slate-600">Generated/defaulted: {preview.generated_fields.join(", ")}</p>}
+            {preview.validation_report.warnings?.length > 0 && <p className="mt-2 text-rose-700">{preview.validation_report.warnings.join(" ")}</p>}
+            {preview.is_valid && <button onClick={handleConfirm} disabled={uploading} className="btn-primary mt-3">Confirm & Import Dataset</button>}
+          </div>
+        )}
       </div>
 
       {/* Metrics Grid */}

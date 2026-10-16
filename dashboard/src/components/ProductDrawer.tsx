@@ -1,16 +1,25 @@
 import React, { useEffect, useState } from "react";
 import { X, TrendingUp, Package, Shield, Calendar, ArrowRight, CheckCircle2, AlertOctagon } from "lucide-react";
 import { api } from "../lib/api";
+import { UserRole } from "../types";
 
 interface ProductDrawerProps {
   productId: string | null;
   onClose: () => void;
   onNavigateToForecast: (productId: string) => void;
+  currentRole: UserRole;
+  onInventoryChanged: () => void;
 }
 
-export const ProductDrawer: React.FC<ProductDrawerProps> = ({ productId, onClose, onNavigateToForecast }) => {
+export const ProductDrawer: React.FC<ProductDrawerProps> = ({ productId, onClose, onNavigateToForecast, currentRole, onInventoryChanged }) => {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(false);
+  const [adjustment, setAdjustment] = useState(0);
+  const [note, setNote] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [workflowMessage, setWorkflowMessage] = useState<string | null>(null);
+  const canAdjust = ["ADMIN", "INVENTORY_MANAGER"].includes(currentRole);
+  const canOrder = ["ADMIN", "INVENTORY_MANAGER", "OPERATIONS_MANAGER"].includes(currentRole);
 
   useEffect(() => {
     if (!productId) {
@@ -26,6 +35,42 @@ export const ProductDrawer: React.FC<ProductDrawerProps> = ({ productId, onClose
   }, [productId]);
 
   if (!productId) return null;
+
+  const refreshDetails = async () => {
+    const result = await api.getProductOptimization(productId);
+    setData(result);
+    onInventoryChanged();
+  };
+
+  const handleAdjustment = async () => {
+    if (!adjustment) return;
+    setSaving(true);
+    setWorkflowMessage(null);
+    try {
+      await api.adjustInventory(productId, adjustment, adjustment > 0 ? "STOCK_COUNT_INCREASE" : "STOCK_COUNT_DECREASE", note);
+      setWorkflowMessage("Stock adjustment recorded in the audit log.");
+      setAdjustment(0);
+      setNote("");
+      await refreshDetails();
+    } catch (err: any) {
+      setWorkflowMessage(err.message || "Unable to record the stock adjustment.");
+    } finally { setSaving(false); }
+  };
+
+  const handleCreateOrder = async () => {
+    const quantity = Number(data?.recommended_order_quantity || 0);
+    if (quantity <= 0) { setWorkflowMessage("There is no recommended order quantity for this product."); return; }
+    setSaving(true);
+    setWorkflowMessage(null);
+    try {
+      const order = await api.createPurchaseOrder(productId, quantity, undefined, note);
+      setWorkflowMessage(`${order.order_number} created for ${quantity} units.`);
+      setNote("");
+      await refreshDetails();
+    } catch (err: any) {
+      setWorkflowMessage(err.message || "Unable to create the purchase order.");
+    } finally { setSaving(false); }
+  };
 
   return (
     <div className="fixed inset-0 z-50 overflow-hidden bg-slate-900/30 backdrop-blur-xs flex justify-end">
@@ -131,6 +176,21 @@ export const ProductDrawer: React.FC<ProductDrawerProps> = ({ productId, onClose
                     </span>
                   </div>
                 </div>
+              </div>
+
+              <div className="border border-slate-200 rounded-2xl p-4 space-y-3 bg-white">
+                <div>
+                  <h4 className="text-xs font-black uppercase tracking-wider text-slate-700">Inventory Workflow</h4>
+                  <p className="text-[11px] text-slate-500 mt-1">Adjust counted stock or create a draft purchase order from the recommendation.</p>
+                </div>
+                <input value={adjustment || ""} onChange={(e) => setAdjustment(Number(e.target.value))} type="number" placeholder="Stock adjustment, e.g. +10 or -3" disabled={!canAdjust || saving} className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:bg-slate-50" />
+                <input value={note} onChange={(e) => setNote(e.target.value)} maxLength={500} placeholder="Optional note" disabled={saving || (!canAdjust && !canOrder)} className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs disabled:bg-slate-50" />
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={handleAdjustment} disabled={!canAdjust || !adjustment || saving} className="btn-secondary justify-center disabled:opacity-50">Record Adjustment</button>
+                  <button onClick={handleCreateOrder} disabled={!canOrder || !data.recommended_order_quantity || saving} className="btn-primary justify-center disabled:opacity-50">Create PO</button>
+                </div>
+                {!canAdjust && !canOrder && <p className="text-[11px] text-slate-500">Your account has read-only inventory access.</p>}
+                {workflowMessage && <p role="status" className="text-xs font-medium text-blue-700">{workflowMessage}</p>}
               </div>
             </>
           ) : (
