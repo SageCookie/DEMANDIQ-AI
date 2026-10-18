@@ -32,14 +32,10 @@ def upgrade() -> None:
     3. Columns don't exist -> add them as lowercase with appropriate NULL/NOT NULL
     """
     conn = op.get_bind()
-
-    # Check current column names (PostgreSQL returns lowercase for unquoted)
-    result = conn.execute(sa.text("""
-        SELECT column_name
-        FROM information_schema.columns
-        WHERE table_name = 'model_runs'
-    """))
-    existing_cols = {row[0] for row in result}
+    inspector = sa.inspect(conn)
+    if 'model_runs' not in inspector.get_table_names():
+        return
+    existing_cols = {column['name'] for column in inspector.get_columns('model_runs')}
 
     # Column mappings: uppercase -> lowercase (current SQLAlchemy model names)
     columns_to_fix = {
@@ -71,13 +67,8 @@ def upgrade() -> None:
     # MAE, RMSE, MAPE are NOT NULL in SQLAlchemy model
     for col in ['mae', 'rmse', 'mape']:
         # Check if column exists and is nullable
-        result = conn.execute(sa.text("""
-            SELECT is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'model_runs' AND column_name = :col_name
-        """), {'col_name': col})
-        row = result.fetchone()
-        if row and row[0] == 'YES':
+        columns = {column['name']: column for column in sa.inspect(conn).get_columns('model_runs')}
+        if col in columns and columns[col]['nullable']:
             # Column exists but is nullable - alter to NOT NULL
             # Since table is empty (0 rows from earlier check), we can safely set NOT NULL
             op.alter_column('model_runs', col, nullable=False)
@@ -91,28 +82,21 @@ def downgrade() -> None:
     - wape -> NULL (this was nullable in original model)
     """
     conn = op.get_bind()
+    inspector = sa.inspect(conn)
+    if 'model_runs' not in inspector.get_table_names():
+        return
 
     # First, restore NOT NULL constraints before renaming
     # mae, rmse, mape were originally NOT NULL
     for col in ['mae', 'rmse', 'mape']:
-        result = conn.execute(sa.text("""
-            SELECT is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'model_runs' AND column_name = :col_name
-        """), {'col_name': col})
-        row = result.fetchone()
-        if row and row[0] == 'YES':
+        columns = {column['name']: column for column in sa.inspect(conn).get_columns('model_runs')}
+        if col in columns and columns[col]['nullable']:
             op.alter_column('model_runs', col, nullable=False)
 
     # wape was originally nullable
     for col in ['wape']:
-        result = conn.execute(sa.text("""
-            SELECT is_nullable
-            FROM information_schema.columns
-            WHERE table_name = 'model_runs' AND column_name = :col_name
-        """), {'col_name': col})
-        row = result.fetchone()
-        if row and row[0] == 'NO':
+        columns = {column['name']: column for column in sa.inspect(conn).get_columns('model_runs')}
+        if col in columns and not columns[col]['nullable']:
             op.alter_column('model_runs', col, nullable=True)
 
     # Rename columns back to uppercase

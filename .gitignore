@@ -10,7 +10,7 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+/lib/
 lib64/
 parts/
 sdist/
@@ -62,6 +62,8 @@ models/experiments/*.joblib
 models/experiments/*.json
 # Local test DB
 test_auth.db
+# Temporary CSV uploads (the original file can contain private business data)
+data/uploads/
 # Alembic SQLite fallback (if any local copy)
 alembic.ini.bak
 # TypeScript build cache

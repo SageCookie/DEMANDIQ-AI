@@ -312,6 +312,12 @@ Services:
 - **`api`**: FastAPI REST service with live model loading (private to the Compose network)
 - **`dashboard`**: Nginx container serving compiled React dashboard (`5173:80`)
 
+## Free cloud deployment
+
+For a public demo deployment, follow the exact instructions in
+[DEPLOYMENT.md](DEPLOYMENT.md). The recommended free combination is Vercel
+(dashboard), Render (API), and Neon (PostgreSQL).
+
 ---
 
 ## 11. Role-Based Access Control (RBAC)

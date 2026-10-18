@@ -25,6 +25,8 @@ def _bootstrap_initial_admin() -> None:
     password = os.getenv("INITIAL_ADMIN_PASSWORD", "")
     if not username or not password:
         return
+    if len(password) < 12:
+        raise RuntimeError("INITIAL_ADMIN_PASSWORD must be at least 12 characters long.")
     from argon2 import PasswordHasher
     db = SessionLocal()
     try:
