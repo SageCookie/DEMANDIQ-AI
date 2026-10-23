@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Database, CheckCircle2, AlertTriangle, FileText, ShieldCheck, RefreshCw, Upload } from "lucide-react";
+import { Database, CheckCircle2, AlertTriangle, FileText, ShieldCheck, RefreshCw, Upload, Loader2 } from "lucide-react";
 import { DataQualityReport, UserRole } from "../types";
 import { api } from "../lib/api";
 
@@ -16,6 +16,7 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
   const [message, setMessage] = useState<string | null>(null);
   const [defaultInventory, setDefaultInventory] = useState(100);
   const [defaultLeadTime, setDefaultLeadTime] = useState(7);
+  const [trainingJob, setTrainingJob] = useState<any | null>(null);
   const canImport = ["ADMIN", "DATA_SCIENTIST"].includes(currentRole);
 
   const loadData = () => {
@@ -30,6 +31,24 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
   useEffect(() => {
     loadData();
   }, []);
+
+  useEffect(() => {
+    if (!trainingJob?.id || ["SUCCEEDED", "FAILED"].includes(trainingJob.status)) return;
+    const interval = window.setInterval(async () => {
+      try {
+        const job = await api.getTrainingJob(trainingJob.id);
+        setTrainingJob(job);
+        setMessage(job.message);
+        if (job.status === "SUCCEEDED") {
+          loadData();
+          onDataImported();
+        }
+      } catch {
+        // The service may be waking from its free-hosted idle state; keep polling.
+      }
+    }, 2500);
+    return () => window.clearInterval(interval);
+  }, [trainingJob?.id, trainingJob?.status]);
 
   const handlePreview = async (file?: File) => {
     if (!file) return;
@@ -51,9 +70,8 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
     try {
       const result = await api.confirmDataUpload(preview.upload_id);
       setMessage(result.message);
+      setTrainingJob(result.training_job || null);
       setPreview(null);
-      loadData();
-      onDataImported();
     } catch (err: any) {
       setMessage(err.message || "Import could not be completed.");
     } finally { setUploading(false); }
@@ -117,6 +135,16 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
           </label>
         </div>
         {message && <p role="status" className="rounded-xl bg-slate-50 border border-slate-200 px-3 py-2 text-xs text-slate-700">{message}</p>}
+        {trainingJob && (
+          <div className={`rounded-xl border px-3 py-3 text-xs ${trainingJob.status === "FAILED" ? "border-rose-200 bg-rose-50 text-rose-800" : "border-blue-200 bg-blue-50 text-blue-900"}`}>
+            <div className="flex items-center justify-between gap-3 font-bold">
+              <span className="flex items-center gap-2">{!["SUCCEEDED", "FAILED"].includes(trainingJob.status) && <Loader2 className="w-3.5 h-3.5 animate-spin" />}Workspace preparation</span>
+              <span>{trainingJob.progress}%</span>
+            </div>
+            <div className="mt-2 h-1.5 rounded-full bg-white/80 overflow-hidden"><div className="h-full bg-blue-600 transition-all" style={{ width: `${trainingJob.progress}%` }} /></div>
+            <p className="mt-2">{trainingJob.status === "SUCCEEDED" ? "Your catalog, forecasts, and reorder recommendations are ready." : trainingJob.status === "FAILED" ? (trainingJob.error_message || "Training failed. Check the data and try again.") : "You can stay on this page while DemandIQ prepares your decisions."}</p>
+          </div>
+        )}
         {preview && (
           <div className={`rounded-xl border p-4 text-xs ${preview.is_valid ? "border-emerald-200 bg-emerald-50" : "border-rose-200 bg-rose-50"}`}>
             <div className="flex flex-wrap justify-between gap-2 font-bold text-slate-800">

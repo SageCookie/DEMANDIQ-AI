@@ -100,6 +100,106 @@ def _require_data_import_role(user: User) -> None:
         create_error("FORBIDDEN", "Your role cannot import sales data.", 403)
 
 
+def _replace_workspace_data(db: Session, clean_df) -> Dict[str, int]:
+    """Replace operational records so every screen uses the newly imported dataset."""
+    import pandas as pd
+
+    # An import replaces a workspace, so its dependent operational records must
+    # change together. Accounts and model-run history remain intact.
+    db.query(PurchaseOrder).delete(synchronize_session=False)
+    db.query(InventoryTransaction).delete(synchronize_session=False)
+    db.query(InventoryRecommendation).delete(synchronize_session=False)
+    db.query(Forecast).delete(synchronize_session=False)
+    db.query(Sale).delete(synchronize_session=False)
+    db.query(Inventory).delete(synchronize_session=False)
+    db.query(Product).delete(synchronize_session=False)
+    db.flush()
+
+    products_by_code: Dict[str, Product] = {}
+    for product_code, group in clean_df.groupby("product_id", sort=True):
+        latest = group.sort_values("date").iloc[-1]
+        product = Product(
+            product_code=str(product_code),
+            product_name=str(latest["product_name"]),
+            category=str(latest["category"]),
+            unit_price=float(latest["unit_price"]),
+            lead_time_days=float(latest["lead_time_days"]),
+            active=True,
+        )
+        db.add(product)
+        db.flush()
+        products_by_code[str(product_code)] = product
+        db.add(Inventory(
+            product_id=product.id,
+            quantity_available=float(latest["inventory_level"]),
+            quantity_reserved=0.0,
+            quantity_on_order=0.0,
+        ))
+
+    sales = [
+        Sale(
+            product_id=products_by_code[str(row.product_id)].id,
+            sale_date=pd.to_datetime(row.date).to_pydatetime(),
+            quantity_sold=float(row.quantity_sold),
+            unit_price=float(row.unit_price),
+            revenue=float(row.revenue),
+        )
+        for row in clean_df.itertuples(index=False)
+    ]
+    db.bulk_save_objects(sales)
+    db.commit()
+    return {"products": len(products_by_code), "sales_records": len(sales)}
+
+
+def _refresh_forecasts_and_recommendations(db: Session) -> None:
+    """Create saved dashboard outputs after a successful training run."""
+    clean_df = _get_cleaned_data()
+    engine = ForecastEngine.get_instance()
+    optimizer = InventoryOptimizer(service_level=settings.default_service_level)
+
+    db.query(Forecast).delete(synchronize_session=False)
+    db.query(InventoryRecommendation).delete(synchronize_session=False)
+    db.flush()
+
+    for product in db.query(Product).filter(Product.active.is_(True)).all():
+        forecasts = engine.generate_forecast(clean_df, product.product_code, horizon_days=30)
+        for item in forecasts:
+            db.add(Forecast(
+                product_id=product.id,
+                forecast_date=datetime.strptime(item["forecast_date"], "%Y-%m-%d"),
+                predicted_demand=float(item["predicted_demand"]),
+                lower_bound=float(item["lower_bound"]),
+                upper_bound=float(item["upper_bound"]),
+                model_version=str(item["model_version"]),
+            ))
+
+        inventory = db.query(Inventory).filter(Inventory.product_id == product.id).first()
+        history = clean_df[clean_df["product_id"].astype(str) == product.product_code]["quantity_sold"]
+        decision = optimizer.optimize_product(
+            product_id=product.product_code,
+            product_name=product.product_name,
+            current_inventory=inventory.quantity_available if inventory else 0.0,
+            on_order_quantity=inventory.quantity_on_order if inventory else 0.0,
+            forecast_daily_demands=[float(item["predicted_demand"]) for item in forecasts],
+            lead_time_days=product.lead_time_days,
+            historical_std_dev=float(history.std()) if len(history) > 1 else 0.0,
+            planning_horizon_days=30,
+        )
+        db.add(InventoryRecommendation(
+            product_id=product.id,
+            current_inventory=decision["current_inventory"],
+            forecast_demand=decision["forecast_demand"],
+            lead_time_demand=decision["lead_time_demand"],
+            safety_stock=decision["safety_stock"],
+            reorder_point=decision["reorder_point"],
+            recommended_quantity=decision["recommended_order_quantity"],
+            stockout_risk=decision["stockout_risk"],
+            recommendation=decision["recommendation"],
+            explanation=decision["explanation"],
+        ))
+    db.commit()
+
+
 def _normalise_upload_columns(raw_df, default_inventory: float, default_lead_time: float):
     """Map common transaction-export headers into DemandIQ's canonical schema."""
     aliases = {
@@ -688,6 +788,12 @@ def _run_training_job(job_id: str) -> None:
         job.model_version, job.completed_at = meta["model_version"], datetime.utcnow()
         db.commit()
         ForecastEngine.get_instance().reload()
+        job.progress, job.message = 95, "Generating forecasts and inventory decisions"
+        db.commit()
+        _refresh_forecasts_and_recommendations(db)
+        job.status, job.progress, job.message = "SUCCEEDED", 100, "Workspace forecasts and reorder decisions are ready"
+        job.completed_at = datetime.utcnow()
+        db.commit()
     except Exception as exc:
         db.rollback()
         job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
@@ -866,9 +972,14 @@ async def preview_data_upload(
     return preview
 
 
-@router.post("/data/upload/{upload_id}/confirm")
-def confirm_data_upload(upload_id: str, current_user=Depends(_require_auth)):
-    """Promote a previously previewed upload, preserving the last source CSV as a backup."""
+@router.post("/data/upload/{upload_id}/confirm", status_code=status.HTTP_202_ACCEPTED)
+def confirm_data_upload(
+    upload_id: str,
+    background_tasks: BackgroundTasks,
+    current_user=Depends(_require_auth),
+    db: Session = Depends(get_db),
+):
+    """Promote an upload, rebuild workspace records, then train its model."""
     _require_data_import_role(current_user)
     pending_path = _pending_uploads.pop(upload_id, None)
     if not pending_path or not pending_path.exists():
@@ -883,10 +994,46 @@ def confirm_data_upload(upload_id: str, current_user=Depends(_require_auth)):
     os.replace(pending_path, target_path)
     invalidate_cleaned_cache()
     clean_df, report, audit = load_and_prepare_data(target_path)
+    synced = _replace_workspace_data(db, clean_df)
+    job = TrainingJob(id=str(uuid.uuid4()), requested_by=current_user.username)
+    db.add(job)
+    db.commit()
+    background_tasks.add_task(_run_training_job, job.id)
     return {
-        "status": "IMPORTED",
-        "message": "Dataset imported. Retrain the model to use the new history for future forecasts.",
+        "status": "IMPORTING",
+        "message": "Data is now in your workspace. Model training and inventory decisions have started in the background.",
         "total_records": len(clean_df),
+        "products_created": synced["products"],
+        "sales_records_created": synced["sales_records"],
+        "training_job": _serialize_training_job(job),
+        "validation_report": report.to_dict(),
+        "cleaning_audit": audit.to_dict(),
+    }
+
+
+@router.post("/workspace/use-demo-data", status_code=status.HTTP_202_ACCEPTED)
+def use_demo_data(
+    background_tasks: BackgroundTasks,
+    current_user=Depends(_require_auth),
+    db: Session = Depends(get_db),
+):
+    """Initialize an empty workspace with the included sample sales history."""
+    _require_data_import_role(current_user)
+    if db.query(Product).count() > 0:
+        create_error("WORKSPACE_ALREADY_INITIALIZED", "This workspace already has data. Import a CSV to replace it.", 409)
+    source_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    clean_df, report, audit = load_and_prepare_data(source_path)
+    synced = _replace_workspace_data(db, clean_df)
+    job = TrainingJob(id=str(uuid.uuid4()), requested_by=current_user.username)
+    db.add(job)
+    db.commit()
+    background_tasks.add_task(_run_training_job, job.id)
+    return {
+        "status": "IMPORTING",
+        "message": "Demo workspace created. Forecasts and reorder decisions are being prepared.",
+        "products_created": synced["products"],
+        "sales_records_created": synced["sales_records"],
+        "training_job": _serialize_training_job(job),
         "validation_report": report.to_dict(),
         "cleaning_audit": audit.to_dict(),
     }

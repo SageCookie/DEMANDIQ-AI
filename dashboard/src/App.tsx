@@ -12,6 +12,7 @@ import { ModelRegistryPage } from "./pages/ModelRegistryPage";
 import { DataQualityPage } from "./pages/DataQualityPage";
 import { SystemHealthPage } from "./pages/SystemHealthPage";
 import { SettingsPage } from "./pages/SettingsPage";
+import { WorkspaceSetupPage } from "./pages/WorkspaceSetupPage";
 import { ProductDrawer } from "./components/ProductDrawer";
 import { DashboardSummary, Product, User, UserRole } from "./types";
 import { LoginPage } from "./components/LoginPage";
@@ -245,12 +246,20 @@ export function App() {
       )}
       {/* Active Tab Router */}
       {activeTab === "dashboard" && (
-        <ExecutiveDashboard
-          summary={summary}
-          loading={loading}
-          onSelectProduct={setSelectedProductId}
-          onNavigateToForecast={handleNavigateToForecast}
-        />
+        !loading && products.length === 0 ? (
+          <WorkspaceSetupPage
+            currentRole={currentRole}
+            onImportData={() => setActiveTab("data-quality")}
+            onReady={loadData}
+          />
+        ) : (
+          <ExecutiveDashboard
+            summary={summary}
+            loading={loading}
+            onSelectProduct={setSelectedProductId}
+            onNavigateToForecast={handleNavigateToForecast}
+          />
+        )
       )}
 
       {activeTab === "forecasting" && (

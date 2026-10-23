@@ -138,6 +138,7 @@ export const api = {
     return request<any>("/data/upload/preview", { method: "POST", body: formData });
   },
   confirmDataUpload: (uploadId: string) => request<any>(`/data/upload/${uploadId}/confirm`, { method: "POST" }),
+  useDemoData: () => request<any>("/workspace/use-demo-data", { method: "POST" }),
   login: (username: string, password: string = "secret") =>
     request<User>("/auth/login", {
       method: "POST",
