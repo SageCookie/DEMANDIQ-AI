@@ -17,6 +17,7 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
   const [defaultInventory, setDefaultInventory] = useState(100);
   const [defaultLeadTime, setDefaultLeadTime] = useState(7);
   const [trainingJob, setTrainingJob] = useState<any | null>(null);
+  const [confirmingImport, setConfirmingImport] = useState(false);
   const canImport = ["ADMIN", "DATA_SCIENTIST"].includes(currentRole);
 
   const loadData = () => {
@@ -66,7 +67,8 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
 
   const handleConfirm = async () => {
     if (!preview?.upload_id) return;
-    setUploading(true);
+    setConfirmingImport(true);
+    setMessage("Import received. Creating your workspace now...");
     try {
       const result = await api.confirmDataUpload(preview.upload_id);
       setMessage(result.message);
@@ -74,6 +76,21 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
       setPreview(null);
     } catch (err: any) {
       setMessage(err.message || "Import could not be completed.");
+    } finally { setConfirmingImport(false); }
+  };
+
+  const handleCancelPreview = async () => {
+    if (!preview?.upload_id) {
+      setPreview(null);
+      return;
+    }
+    setUploading(true);
+    try {
+      await api.cancelDataUpload(preview.upload_id);
+      setPreview(null);
+      setMessage("CSV import cancelled. Your active workspace was not changed.");
+    } catch (err: any) {
+      setMessage(err.message || "Unable to cancel this staged import.");
     } finally { setUploading(false); }
   };
 
@@ -155,7 +172,17 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
             {Object.keys(preview.applied_mappings || {}).length > 0 && <p className="mt-2 text-slate-600">Mapped: {Object.entries(preview.applied_mappings).map(([target, source]) => `${source} → ${target}`).join(", ")}</p>}
             {preview.generated_fields?.length > 0 && <p className="mt-2 text-slate-600">Generated/defaulted: {preview.generated_fields.join(", ")}</p>}
             {preview.validation_report.warnings?.length > 0 && <p className="mt-2 text-rose-700">{preview.validation_report.warnings.join(" ")}</p>}
-            {preview.is_valid && <button onClick={handleConfirm} disabled={uploading} className="btn-primary mt-3">Confirm & Import Dataset</button>}
+            <div className="mt-3 flex flex-wrap gap-2">
+              {preview.is_valid && (
+                <button onClick={handleConfirm} disabled={uploading || confirmingImport} className="btn-primary disabled:opacity-60 disabled:cursor-wait">
+                  {confirmingImport && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  <span>{confirmingImport ? "Importing dataset..." : "Confirm & Import Dataset"}</span>
+                </button>
+              )}
+              <button onClick={handleCancelPreview} disabled={uploading || confirmingImport} className="btn-secondary disabled:opacity-60">
+                Cancel
+              </button>
+            </div>
           </div>
         )}
       </div>

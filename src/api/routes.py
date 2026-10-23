@@ -784,11 +784,13 @@ def _run_training_job(job_id: str) -> None:
             mape=meta["test_metrics"]["MAPE"], wape=meta["test_metrics"]["WAPE"],
             status="PRODUCTION", artifact_path=meta["artifact_path"],
         ))
-        job.status, job.progress, job.message = "SUCCEEDED", 100, "Model training completed"
-        job.model_version, job.completed_at = meta["model_version"], datetime.utcnow()
+        # Training is complete, but the workspace is not ready until forecasts
+        # and inventory decisions have also been persisted.
+        job.status, job.progress, job.message = "RUNNING", 90, "Saving champion model"
+        job.model_version = meta["model_version"]
         db.commit()
         ForecastEngine.get_instance().reload()
-        job.progress, job.message = 95, "Generating forecasts and inventory decisions"
+        job.status, job.progress, job.message = "RUNNING", 95, "Generating forecasts and inventory decisions"
         db.commit()
         _refresh_forecasts_and_recommendations(db)
         job.status, job.progress, job.message = "SUCCEEDED", 100, "Workspace forecasts and reorder decisions are ready"
@@ -970,6 +972,16 @@ async def preview_data_upload(
         _pending_uploads[upload_id] = pending_path
         preview.update({"upload_id": upload_id, "cleaning_audit": audit.to_dict(), "normalized_records": len(clean_df)})
     return preview
+
+
+@router.delete("/data/upload/{upload_id}", status_code=status.HTTP_204_NO_CONTENT)
+def cancel_data_upload(upload_id: str, current_user=Depends(_require_auth)):
+    """Discard a staged CSV before it replaces the active workspace data."""
+    _require_data_import_role(current_user)
+    pending_path = _pending_uploads.pop(upload_id, None)
+    if pending_path and pending_path.exists():
+        pending_path.unlink()
+    return None
 
 
 @router.post("/data/upload/{upload_id}/confirm", status_code=status.HTTP_202_ACCEPTED)
