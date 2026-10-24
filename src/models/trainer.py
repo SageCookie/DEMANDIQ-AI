@@ -20,10 +20,11 @@ from src.utils.logger import logger
 from src.config.settings import settings
 
 class ModelTrainingPipeline:
-    def __init__(self, data_path: Path | str):
+    def __init__(self, data_path: Path | str, production_dir: Path | str | None = None, model_version_prefix: str = ""):
         self.data_path = Path(data_path)
-        self.production_dir = Path(settings.model_path).parent
-        self.experiments_dir = settings.base_dir / "models" / "experiments"
+        self.production_dir = Path(production_dir or Path(settings.model_path).parent)
+        self.experiments_dir = self.production_dir / "experiments"
+        self.model_version_prefix = model_version_prefix
         self.production_dir.mkdir(parents=True, exist_ok=True)
         self.experiments_dir.mkdir(parents=True, exist_ok=True)
 
@@ -104,10 +105,11 @@ class ModelTrainingPipeline:
         test_metrics["training_time_ms"] = final_training_time_ms
 
         # 6. Save model artifact and metadata
-        model_version = f"v1.{int(time.time()) % 100000}"
+        model_version = f"{self.model_version_prefix}v1.{int(time.time()) % 100000}"
         artifact_filename = f"{best_model_name.lower().replace(' ', '_')}_{model_version}.joblib"
         exp_artifact_path = self.experiments_dir / artifact_filename
-        prod_artifact_path = Path(settings.model_path)
+        prod_artifact_path = self.production_dir / "demand_model.joblib"
+        prod_metadata_path = self.production_dir / "metadata.json"
 
         # Save to experiment & production
         joblib.dump(final_model, exp_artifact_path)
@@ -132,7 +134,7 @@ class ModelTrainingPipeline:
         }
 
         # Save metadata to production and experiment
-        with open(settings.metadata_path, "w") as f:
+        with open(prod_metadata_path, "w") as f:
             json.dump(metadata, f, indent=2, default=str)
 
         exp_metadata_path = self.experiments_dir / f"metadata_{model_version}.json"
