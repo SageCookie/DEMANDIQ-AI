@@ -31,7 +31,15 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }
 
     const trimmedUsername = username.trim();
     if (!trimmedUsername || !password || (mode === "register" && !organizationName.trim())) {
-      setErrorMessage("Please enter both your username and password.");
+      setErrorMessage(mode === "register" ? "Enter an organisation name, username, and password." : "Enter your username and password.");
+      return;
+    }
+    if (mode === "register" && !/^[A-Za-z0-9_.-]+$/.test(trimmedUsername)) {
+      setErrorMessage("Username can contain only letters, numbers, dots, underscores, and hyphens—no spaces.");
+      return;
+    }
+    if (mode === "register" && password.length < 12) {
+      setErrorMessage("Choose a password with at least 12 characters for workspace security.");
       return;
     }
 

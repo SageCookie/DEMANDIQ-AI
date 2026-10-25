@@ -11,6 +11,7 @@ interface DataQualityPageProps {
 export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, onDataImported }) => {
   const [data, setData] = useState<DataQualityReport | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [preview, setPreview] = useState<any | null>(null);
   const [uploading, setUploading] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -22,10 +23,17 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
 
   const loadData = () => {
     setLoading(true);
+    setLoadError(null);
     api
       .getDataQuality()
       .then((res) => setData(res))
-      .catch((err) => console.error(err))
+      .catch((err) => {
+        console.error(err);
+        const message = err instanceof Error ? err.message : String(err);
+        setLoadError(message.includes("Historical dataset") || message.includes("Historical data source")
+          ? "This workspace does not have a sales dataset yet. Import a CSV or use the demo dataset to begin."
+          : "We could not evaluate this workspace's data quality. Please try again.");
+      })
       .finally(() => setLoading(false));
   };
 
@@ -94,10 +102,24 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
     } finally { setUploading(false); }
   };
 
-  if (loading || !data) {
+  if (loading) {
     return (
       <div className="card p-12 text-center text-slate-400 animate-pulse">
         Evaluating dataset health and cleaning audit...
+      </div>
+    );
+  }
+
+  if (loadError || !data) {
+    return (
+      <div className="card p-8 text-center">
+        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
+        <h2 className="mt-3 text-sm font-extrabold text-slate-900">Data quality is not available yet</h2>
+        <p className="mx-auto mt-2 max-w-lg text-xs leading-5 text-slate-600">{loadError || "Import a dataset before running the quality audit."}</p>
+        <div className="mt-4 flex justify-center gap-2">
+          <button onClick={loadData} className="btn-secondary"><RefreshCw className="h-3.5 w-3.5" /> Try again</button>
+          {canImport && <label className="btn-primary cursor-pointer"><Upload className="h-3.5 w-3.5" /> Import CSV<input id="quality-csv-input" type="file" accept=".csv,text/csv" className="hidden" disabled={uploading} onChange={(e) => handlePreview(e.target.files?.[0])} /></label>}
+        </div>
       </div>
     );
   }
@@ -139,7 +161,7 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
           <label className={`btn-primary cursor-pointer ${!canImport || uploading ? "opacity-50 pointer-events-none" : ""}`}>
             <Upload className="w-4 h-4" />
             <span>{uploading ? "Checking file..." : "Choose CSV"}</span>
-            <input type="file" accept=".csv,text/csv" className="hidden" disabled={!canImport || uploading} onChange={(e) => handlePreview(e.target.files?.[0])} />
+            <input id="quality-csv-input" type="file" accept=".csv,text/csv" className="hidden" disabled={!canImport || uploading} onChange={(e) => handlePreview(e.target.files?.[0])} />
           </label>
         </div>
         {!canImport && <p className="text-xs text-slate-500">Data import is available to Administrators and Data Scientists.</p>}
