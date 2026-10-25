@@ -14,21 +14,27 @@ depends_on = None
 
 
 def upgrade():
-    op.create_table(
-        "training_jobs",
-        sa.Column("id", sa.String(length=36), primary_key=True),
-        sa.Column("status", sa.String(length=20), nullable=False),
-        sa.Column("progress", sa.Integer(), nullable=False),
-        sa.Column("message", sa.String(length=500), nullable=False),
-        sa.Column("requested_by", sa.String(length=50), nullable=False),
-        sa.Column("model_version", sa.String(length=50), nullable=True),
-        sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), nullable=False),
-        sa.Column("started_at", sa.DateTime(), nullable=True),
-        sa.Column("completed_at", sa.DateTime(), nullable=True),
-    )
-    op.create_index("ix_training_jobs_status", "training_jobs", ["status"])
-    op.create_index("ix_training_jobs_created_at", "training_jobs", ["created_at"])
+    # Preserve installations that created this table before Alembic tracked it.
+    inspector = sa.inspect(op.get_bind())
+    if "training_jobs" not in inspector.get_table_names():
+        op.create_table(
+            "training_jobs",
+            sa.Column("id", sa.String(length=36), primary_key=True),
+            sa.Column("status", sa.String(length=20), nullable=False),
+            sa.Column("progress", sa.Integer(), nullable=False),
+            sa.Column("message", sa.String(length=500), nullable=False),
+            sa.Column("requested_by", sa.String(length=50), nullable=False),
+            sa.Column("model_version", sa.String(length=50), nullable=True),
+            sa.Column("error_message", sa.Text(), nullable=True),
+            sa.Column("created_at", sa.DateTime(), nullable=False),
+            sa.Column("started_at", sa.DateTime(), nullable=True),
+            sa.Column("completed_at", sa.DateTime(), nullable=True),
+        )
+    existing_indexes = {index["name"] for index in sa.inspect(op.get_bind()).get_indexes("training_jobs")}
+    if "ix_training_jobs_status" not in existing_indexes:
+        op.create_index("ix_training_jobs_status", "training_jobs", ["status"])
+    if "ix_training_jobs_created_at" not in existing_indexes:
+        op.create_index("ix_training_jobs_created_at", "training_jobs", ["created_at"])
 
 
 def downgrade():

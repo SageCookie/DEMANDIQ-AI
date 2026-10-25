@@ -97,9 +97,16 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+class RegistrationRequest(BaseModel):
+    organization_name: str = Field(min_length=2, max_length=120)
+    username: str = Field(min_length=3, max_length=50, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(min_length=12, max_length=128)
+
 class UserProfile(BaseModel):
     id: str
     username: str
     name: str
     role: str
     token: str
+    organization_id: int
+    organization_name: str

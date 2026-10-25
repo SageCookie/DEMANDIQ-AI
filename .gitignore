@@ -68,3 +68,5 @@ data/uploads/
 alembic.ini.bak
 # TypeScript build cache
 *.tsbuildinfo
+PROJECT_PLAN.md
+demandiq.db.backup

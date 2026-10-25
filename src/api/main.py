@@ -11,7 +11,7 @@ from src.api.routes import router
 from src.utils.logger import logger
 from src.database.session import Base, engine
 from src.database.session import SessionLocal
-from src.database.models import User
+from src.database.models import User, Organization, OrganizationMembership
 
 # Keep local development convenient while production schema changes remain
 # explicitly managed by Alembic.
@@ -31,7 +31,15 @@ def _bootstrap_initial_admin() -> None:
     db = SessionLocal()
     try:
         if not db.query(User).filter(User.role == "ADMIN").first():
-            db.add(User(username=username, password_hash=PasswordHasher().hash(password), role="ADMIN", is_active=True))
+            user = User(username=username, password_hash=PasswordHasher().hash(password), role="ADMIN", is_active=True)
+            db.add(user)
+            db.flush()
+            organization = db.query(Organization).filter(Organization.slug == "default-workspace").first()
+            if not organization:
+                organization = Organization(name="Default Workspace", slug="default-workspace")
+                db.add(organization)
+                db.flush()
+            db.add(OrganizationMembership(organization_id=organization.id, user_id=user.id, role="ADMIN"))
             db.commit()
             logger.info("Created configured initial administrator '%s'.", username)
     finally:

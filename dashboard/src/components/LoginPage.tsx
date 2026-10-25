@@ -20,6 +20,8 @@ export interface LoginPageProps {
 export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }) => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [organizationName, setOrganizationName] = useState("");
+  const [mode, setMode] = useState<"login" | "register">("login");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -28,7 +30,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }
     e.preventDefault();
 
     const trimmedUsername = username.trim();
-    if (!trimmedUsername || !password) {
+    if (!trimmedUsername || !password || (mode === "register" && !organizationName.trim())) {
       setErrorMessage("Please enter both your username and password.");
       return;
     }
@@ -37,7 +39,9 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }
     setErrorMessage(null);
 
     try {
-      const user = await api.login(trimmedUsername, password);
+      const user = mode === "register"
+        ? await api.register(organizationName.trim(), trimmedUsername, password)
+        : await api.login(trimmedUsername, password);
 
       if (!user || !user.token) {
         throw new Error("Invalid response from authentication service.");
@@ -69,9 +73,7 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }
       ) {
         setErrorMessage("Invalid username or password. Please verify your credentials and try again.");
       } else {
-        setErrorMessage(
-          "Unable to connect to the authentication service. Please check your network and try again."
-        );
+        setErrorMessage(rawMessage || "We could not complete that request. Please try again.");
       }
     } finally {
       setIsLoading(false);
@@ -117,10 +119,10 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }
               <Lock className="w-5 h-5" />
             </div>
             <h1 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">
-              Sign In to DemandIQ
+              {mode === "register" ? "Create your workspace" : "Sign In to DemandIQ"}
             </h1>
             <p className="text-xs sm:text-sm text-slate-500">
-              Enter your credentials to access demand forecasting and inventory intelligence.
+              {mode === "register" ? "Create a private workspace for your organization. You will be its first administrator." : "Enter your credentials to access demand forecasting and inventory intelligence."}
             </p>
           </div>
 
@@ -138,6 +140,12 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }
 
           {/* Login Form */}
           <form onSubmit={handleSubmit} className="space-y-4" noValidate>
+            {mode === "register" && (
+              <div className="space-y-1.5">
+                <label htmlFor="organization-name" className="block text-xs font-bold text-slate-700">Organization name</label>
+                <input id="organization-name" type="text" disabled={isLoading} value={organizationName} onChange={(e) => setOrganizationName(e.target.value)} placeholder="Example Retail Pvt Ltd" className="w-full px-3.5 py-2.5 rounded-xl border border-slate-200 bg-white text-xs sm:text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-600" />
+              </div>
+            )}
             {/* Username Input */}
             <div className="space-y-1.5">
               <label
@@ -213,23 +221,27 @@ export const LoginPage: React.FC<LoginPageProps> = ({ onLoginSuccess, onCancel }
             <div className="pt-2">
               <button
                 type="submit"
-                disabled={isLoading || !username.trim() || !password}
+                disabled={isLoading || !username.trim() || !password || (mode === "register" && !organizationName.trim())}
                 className="btn-primary w-full py-3 justify-center text-xs sm:text-sm font-bold shadow-md shadow-blue-500/25 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
               >
                 {isLoading ? (
                   <>
                     <Loader2 className="w-4 h-4 animate-spin" />
-                    <span>Signing in...</span>
+                    <span>{mode === "register" ? "Creating workspace..." : "Signing in..."}</span>
                   </>
                 ) : (
                   <>
-                    <span>Sign In</span>
+                    <span>{mode === "register" ? "Create workspace" : "Sign In"}</span>
                     <ArrowRight className="w-4 h-4" />
                   </>
                 )}
               </button>
             </div>
           </form>
+
+          <button type="button" disabled={isLoading} onClick={() => { setMode(mode === "login" ? "register" : "login"); setErrorMessage(null); }} className="w-full text-xs font-bold text-blue-700 hover:text-blue-900">
+            {mode === "login" ? "New here? Create a private workspace" : "Already have an account? Sign in"}
+          </button>
 
           {/* Security & Access Notice */}
           <div className="pt-4 border-t border-slate-100 flex items-center justify-center gap-2 text-[11px] text-slate-500 font-medium">

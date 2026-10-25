@@ -43,6 +43,7 @@ interface AppShellProps {
   onOpenLanding: () => void;
   onLogout?: () => void;
   userName?: string;
+  organizationName?: string;
   children: React.ReactNode;
 }
 
@@ -55,6 +56,7 @@ export const AppShell: React.FC<AppShellProps> = ({
   onOpenLanding,
   onLogout,
   userName,
+  organizationName,
   children,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -105,6 +107,13 @@ export const AppShell: React.FC<AppShellProps> = ({
             </div>
           </div>
         </div>
+
+        {organizationName && (
+          <div className="mx-4 mt-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2">
+            <p className="text-[9px] font-bold uppercase tracking-wider text-blue-600">Workspace</p>
+            <p className="mt-0.5 truncate text-xs font-bold text-blue-950" title={organizationName}>{organizationName}</p>
+          </div>
+        )}
 
         {/* Navigation Menu */}
         <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">

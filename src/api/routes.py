@@ -1,19 +1,20 @@
 import os
 import json
 import uuid
+import re
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any
 from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status, Header, UploadFile, File, Form
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func, case
+from sqlalchemy import func, case, or_
 
 from src.config.settings import settings
 from src.database.session import get_db, SessionLocal
 from src.database.models import (
     Product, Sale, Inventory, Forecast, InventoryRecommendation, ModelRun, User, Session,
-    InventoryTransaction, PurchaseOrder, TrainingJob
+    InventoryTransaction, PurchaseOrder, TrainingJob, Organization, OrganizationMembership
 )
 from src.data.ingestion import load_and_prepare_data
 from src.data.validation import validate_dataset
@@ -25,7 +26,7 @@ from src.api.schemas import (
     ProductResponse, ProductCreate, ProductUpdate,
     ForecastRequest, ForecastResponse, ForecastItem,
     InventoryRecommendationItem, DashboardSummaryResponse, InventoryAdjustmentRequest, PurchaseOrderCreate,
-    LoginRequest, UserProfile
+    LoginRequest, UserProfile, RegistrationRequest
 )
 from src.utils.logger import logger
 
@@ -52,7 +53,34 @@ def _require_auth(db: Session = Depends(get_db), authorization: Optional[str] = 
     user = db.query(User).filter(User.id == session.user_id).first()
     if not user or not user.is_active:
         create_error('UNAUTHORIZED', 'User account disabled.', 401)
+    membership = db.query(OrganizationMembership).filter(OrganizationMembership.user_id == user.id).order_by(OrganizationMembership.id).first()
+    if not membership:
+        create_error('WORKSPACE_REQUIRED', 'This account is not assigned to a workspace.', 403)
+    # Attach the selected workspace to this request-scoped user object. API
+    # handlers must derive every business-data query from this value.
+    user.organization_id = membership.organization_id
+    user.role = membership.role
     return user
+
+
+def _organization_id(user: User) -> int:
+    organization_id = getattr(user, "organization_id", None)
+    if not organization_id:
+        create_error("WORKSPACE_REQUIRED", "No active workspace is available for this account.", 403)
+    return int(organization_id)
+
+
+def _workspace_data_path(organization_id: int) -> Path:
+    return settings.base_dir / "data" / "workspaces" / str(organization_id) / "historical_sales.csv"
+
+
+def _workspace_model_dir(organization_id: int) -> Path:
+    return settings.base_dir / "models" / "workspaces" / str(organization_id)
+
+
+def _workspace_forecast_engine(organization_id: int) -> ForecastEngine:
+    model_dir = _workspace_model_dir(organization_id)
+    return ForecastEngine(model_dir / "demand_model.joblib", model_dir / "metadata.json")
 
 
 def _session_from_authorization(authorization: Optional[str], db: Session) -> Session:
@@ -70,29 +98,29 @@ def _session_from_authorization(authorization: Optional[str], db: Session) -> Se
 router = APIRouter(prefix="/api/v1")
 
 # Cache cleaned dataset keyed by file mtime to avoid re-parsing the CSV on every request.
-_cleaned_cache: Dict[str, Any] = {"df": None, "mtime": None}
+_cleaned_cache: Dict[str, Any] = {}
 _pending_uploads: Dict[str, Path] = {}
 _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 
-def _get_cleaned_data():
+def _get_cleaned_data(organization_id: int):
     """Return cached cleaned DataFrame, re-loading only if the source CSV changed."""
-    raw_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    raw_path = _workspace_data_path(organization_id)
     try:
         mtime = raw_path.stat().st_mtime
     except OSError:
         mtime = None
-    if _cleaned_cache["df"] is None or _cleaned_cache["mtime"] != mtime:
+    cache_key = str(raw_path)
+    cached = _cleaned_cache.get(cache_key)
+    if not cached or cached["mtime"] != mtime:
         clean_df, _, _ = load_and_prepare_data(raw_path)
-        _cleaned_cache["df"] = clean_df
-        _cleaned_cache["mtime"] = mtime
-    return _cleaned_cache["df"]
+        _cleaned_cache[cache_key] = {"df": clean_df, "mtime": mtime}
+    return _cleaned_cache[cache_key]["df"]
 
 
 def invalidate_cleaned_cache():
     """Drop the cached cleaned dataset (call after retraining/re-ingestion)."""
-    _cleaned_cache["df"] = None
-    _cleaned_cache["mtime"] = None
+    _cleaned_cache.clear()
 
 
 def _require_data_import_role(user: User) -> None:
@@ -100,25 +128,29 @@ def _require_data_import_role(user: User) -> None:
         create_error("FORBIDDEN", "Your role cannot import sales data.", 403)
 
 
-def _replace_workspace_data(db: Session, clean_df) -> Dict[str, int]:
+def _replace_workspace_data(db: Session, clean_df, organization_id: int) -> Dict[str, int]:
     """Replace operational records so every screen uses the newly imported dataset."""
     import pandas as pd
 
     # An import replaces a workspace, so its dependent operational records must
     # change together. Accounts and model-run history remain intact.
-    db.query(PurchaseOrder).delete(synchronize_session=False)
-    db.query(InventoryTransaction).delete(synchronize_session=False)
-    db.query(InventoryRecommendation).delete(synchronize_session=False)
-    db.query(Forecast).delete(synchronize_session=False)
-    db.query(Sale).delete(synchronize_session=False)
-    db.query(Inventory).delete(synchronize_session=False)
-    db.query(Product).delete(synchronize_session=False)
+    workspace_products = db.query(Product).filter(Product.organization_id == organization_id).all()
+    workspace_product_ids = [product.id for product in workspace_products]
+    if workspace_product_ids:
+        db.query(PurchaseOrder).filter(PurchaseOrder.product_id.in_(workspace_product_ids)).delete(synchronize_session=False)
+        db.query(InventoryTransaction).filter(InventoryTransaction.product_id.in_(workspace_product_ids)).delete(synchronize_session=False)
+        db.query(InventoryRecommendation).filter(InventoryRecommendation.product_id.in_(workspace_product_ids)).delete(synchronize_session=False)
+        db.query(Forecast).filter(Forecast.product_id.in_(workspace_product_ids)).delete(synchronize_session=False)
+        db.query(Sale).filter(Sale.product_id.in_(workspace_product_ids)).delete(synchronize_session=False)
+        db.query(Inventory).filter(Inventory.product_id.in_(workspace_product_ids)).delete(synchronize_session=False)
+        db.query(Product).filter(Product.id.in_(workspace_product_ids)).delete(synchronize_session=False)
     db.flush()
 
     products_by_code: Dict[str, Product] = {}
     for product_code, group in clean_df.groupby("product_id", sort=True):
         latest = group.sort_values("date").iloc[-1]
         product = Product(
+            organization_id=organization_id,
             product_code=str(product_code),
             product_name=str(latest["product_name"]),
             category=str(latest["category"]),
@@ -151,17 +183,20 @@ def _replace_workspace_data(db: Session, clean_df) -> Dict[str, int]:
     return {"products": len(products_by_code), "sales_records": len(sales)}
 
 
-def _refresh_forecasts_and_recommendations(db: Session) -> None:
+def _refresh_forecasts_and_recommendations(db: Session, organization_id: int) -> None:
     """Create saved dashboard outputs after a successful training run."""
-    clean_df = _get_cleaned_data()
-    engine = ForecastEngine.get_instance()
+    clean_df = _get_cleaned_data(organization_id)
+    engine = _workspace_forecast_engine(organization_id)
     optimizer = InventoryOptimizer(service_level=settings.default_service_level)
 
-    db.query(Forecast).delete(synchronize_session=False)
-    db.query(InventoryRecommendation).delete(synchronize_session=False)
+    products = db.query(Product).filter(Product.organization_id == organization_id, Product.active.is_(True)).all()
+    product_ids = [product.id for product in products]
+    if product_ids:
+        db.query(Forecast).filter(Forecast.product_id.in_(product_ids)).delete(synchronize_session=False)
+        db.query(InventoryRecommendation).filter(InventoryRecommendation.product_id.in_(product_ids)).delete(synchronize_session=False)
     db.flush()
 
-    for product in db.query(Product).filter(Product.active.is_(True)).all():
+    for product in products:
         forecasts = engine.generate_forecast(clean_df, product.product_code, horizon_days=30)
         for item in forecasts:
             db.add(Forecast(
@@ -259,24 +294,25 @@ def get_health():
     }
 
 @router.get("/system/status")
-def get_system_status(db: Session = Depends(get_db)):
+def get_system_status(current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    organization_id = _organization_id(current_user)
     try:
-        db_check = db.query(Product).count()
+        db_check = db.query(Product).filter(Product.organization_id == organization_id).count()
         db_status = "OPERATIONAL"
     except Exception as e:
         db_status = f"ERROR: {str(e)}"
 
     metadata: Dict[str, Any] = {}
-    forecast_engine = ForecastEngine.get_instance()
+    forecast_engine = _workspace_forecast_engine(organization_id)
     try:
         metadata = forecast_engine.get_metadata()
         model_status = "LOADED" if metadata.get("status") == "PRODUCTION" else "STANDBY"
     except Exception:
         model_status = "UNAVAILABLE"
 
-    last_model_run = db.query(ModelRun).order_by(ModelRun.timestamp.desc()).first()
-    last_forecast = db.query(Forecast).order_by(Forecast.generated_at.desc()).first()
-    latest_sale = db.query(Sale).order_by(Sale.sale_date.desc()).first()
+    last_model_run = db.query(ModelRun).filter(ModelRun.organization_id == organization_id).order_by(ModelRun.timestamp.desc()).first()
+    last_forecast = db.query(Forecast).join(Product).filter(Product.organization_id == organization_id).order_by(Forecast.generated_at.desc()).first()
+    latest_sale = db.query(Sale).join(Product).filter(Product.organization_id == organization_id).order_by(Sale.sale_date.desc()).first()
 
     return {
         "api_status": "ONLINE",
@@ -294,8 +330,8 @@ def get_system_status(db: Session = Depends(get_db)):
 # ----------------- Products -----------------
 
 @router.get("/products", response_model=List[ProductResponse])
-def get_products(category: Optional[str] = None, db: Session = Depends(get_db)):
-    query = db.query(Product)
+def get_products(category: Optional[str] = None, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    query = db.query(Product).filter(Product.organization_id == _organization_id(current_user))
     if category:
         query = query.filter(Product.category == category)
     products = query.order_by(Product.product_code).all()
@@ -317,17 +353,19 @@ def get_products(category: Optional[str] = None, db: Session = Depends(get_db)):
         ))
     return res
 
-def _get_product(db: Session, product_id: str):
+def _get_product(db: Session, product_id: str, organization_id: int):
     """Resolve a product by product_code or numeric id safely."""
-    query = db.query(Product).filter(Product.product_code == product_id)
+    query = db.query(Product).filter(Product.organization_id == organization_id)
     if product_id.isdigit():
-        query = query.or_(Product.id == int(product_id))
+        query = query.filter(or_(Product.product_code == product_id, Product.id == int(product_id)))
+    else:
+        query = query.filter(Product.product_code == product_id)
     return query.first()
 
 
 @router.get("/products/{product_id}", response_model=ProductResponse)
-def get_product_detail(product_id: str, db: Session = Depends(get_db)):
-    prod = _get_product(db, product_id)
+def get_product_detail(product_id: str, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    prod = _get_product(db, product_id, _organization_id(current_user))
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"The requested product '{product_id}' does not exist.", 404)
 
@@ -349,11 +387,13 @@ def get_product_detail(product_id: str, db: Session = Depends(get_db)):
 def create_product(payload: ProductCreate, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
     if current_user.role not in ROLE_PERMISSIONS or "edit_products" not in ROLE_PERMISSIONS.get(current_user.role, []):
         create_error("FORBIDDEN", "Insufficient permissions.", 403)
-    existing = db.query(Product).filter(Product.product_code == payload.product_code).first()
+    organization_id = _organization_id(current_user)
+    existing = db.query(Product).filter(Product.product_code == payload.product_code, Product.organization_id == organization_id).first()
     if existing:
         create_error("INVALID_REQUEST", f"Product code '{payload.product_code}' already exists.", 400)
 
     prod = Product(
+        organization_id=organization_id,
         product_code=payload.product_code,
         product_name=payload.product_name,
         category=payload.category,
@@ -390,7 +430,7 @@ def create_product(payload: ProductCreate, current_user = Depends(_require_auth)
 def update_product(product_id: str, payload: ProductUpdate, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
     if current_user.role not in ROLE_PERMISSIONS or "edit_products" not in ROLE_PERMISSIONS.get(current_user.role, []):
         create_error("FORBIDDEN", "Insufficient permissions.", 403)
-    prod = _get_product(db, product_id)
+    prod = _get_product(db, product_id, _organization_id(current_user))
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"The requested product '{product_id}' does not exist.", 404)
 
@@ -426,16 +466,17 @@ def update_product(product_id: str, payload: ProductUpdate, current_user = Depen
 def generate_forecast_endpoint(payload: ForecastRequest, current_user = Depends(_require_auth), db: Session = Depends(get_db)):
     if current_user.role not in ROLE_PERMISSIONS or "create_forecasts" not in ROLE_PERMISSIONS.get(current_user.role, []):
         create_error("FORBIDDEN", "Insufficient permissions.", 403)
-    prod = _get_product(db, payload.product_id)
+    organization_id = _organization_id(current_user)
+    prod = _get_product(db, payload.product_id, organization_id)
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"Product '{payload.product_id}' not found.", 404)
 
-    raw_data_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    raw_data_path = _workspace_data_path(organization_id)
     if not raw_data_path.exists():
         create_error("INTERNAL_SERVER_ERROR", "Historical dataset not initialized.", 500)
 
-    clean_df = _get_cleaned_data()
-    engine = ForecastEngine.get_instance()
+    clean_df = _get_cleaned_data(organization_id)
+    engine = _workspace_forecast_engine(organization_id)
 
     try:
         forecast_items = engine.generate_forecast(
@@ -468,8 +509,8 @@ def generate_forecast_endpoint(payload: ForecastRequest, current_user = Depends(
     )
 
 @router.get("/forecasts/history")
-def get_forecast_history(product_id: Optional[str] = None, db: Session = Depends(get_db)):
-    query = db.query(Forecast).join(Product)
+def get_forecast_history(product_id: Optional[str] = None, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    query = db.query(Forecast).join(Product).filter(Product.organization_id == _organization_id(current_user))
     if product_id:
         query = query.filter(Product.product_code == product_id)
     records = query.order_by(Forecast.forecast_date.asc()).limit(200).all()
@@ -496,9 +537,10 @@ def get_forecast_history(product_id: Optional[str] = None, db: Session = Depends
 def get_recommendations(
     risk: Optional[str] = None,
     category: Optional[str] = None,
+    current_user=Depends(_require_auth),
     db: Session = Depends(get_db)
 ):
-    query = db.query(InventoryRecommendation).join(Product)
+    query = db.query(InventoryRecommendation).join(Product).filter(Product.organization_id == _organization_id(current_user))
     if risk:
         query = query.filter(InventoryRecommendation.stockout_risk == risk.upper())
     if category:
@@ -542,8 +584,8 @@ def get_recommendations(
     return items
 
 @router.get("/inventory/optimization/{product_id}")
-def get_product_optimization_details(product_id: str, db: Session = Depends(get_db)):
-    prod = _get_product(db, product_id)
+def get_product_optimization_details(product_id: str, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    prod = _get_product(db, product_id, _organization_id(current_user))
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"Product '{product_id}' not found.", 404)
 
@@ -579,7 +621,7 @@ def adjust_inventory(
     """Apply an audited physical-stock adjustment without allowing negative inventory."""
     if current_user.role not in {"ADMIN", "INVENTORY_MANAGER"}:
         create_error("FORBIDDEN", "Your role cannot adjust physical inventory.", 403)
-    product = _get_product(db, product_id)
+    product = _get_product(db, product_id, _organization_id(current_user))
     if not product:
         create_error("PRODUCT_NOT_FOUND", f"Product '{product_id}' not found.", 404)
     inventory = db.query(Inventory).filter(Inventory.product_id == product.id).first()
@@ -606,8 +648,8 @@ def adjust_inventory(
 
 
 @router.get("/inventory/{product_id}/adjustments")
-def get_inventory_adjustments(product_id: str, db: Session = Depends(get_db)):
-    product = _get_product(db, product_id)
+def get_inventory_adjustments(product_id: str, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    product = _get_product(db, product_id, _organization_id(current_user))
     if not product:
         create_error("PRODUCT_NOT_FOUND", f"Product '{product_id}' not found.", 404)
     records = db.query(InventoryTransaction).filter(InventoryTransaction.product_id == product.id).order_by(InventoryTransaction.created_at.desc()).limit(50).all()
@@ -618,7 +660,7 @@ def get_inventory_adjustments(product_id: str, db: Session = Depends(get_db)):
 def create_purchase_order(payload: PurchaseOrderCreate, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
     if current_user.role not in {"ADMIN", "INVENTORY_MANAGER", "OPERATIONS_MANAGER"}:
         create_error("FORBIDDEN", "Your role cannot create purchase orders.", 403)
-    product = _get_product(db, payload.product_id)
+    product = _get_product(db, payload.product_id, _organization_id(current_user))
     if not product:
         create_error("PRODUCT_NOT_FOUND", f"Product '{payload.product_id}' not found.", 404)
     inventory = db.query(Inventory).filter(Inventory.product_id == product.id).first()
@@ -635,8 +677,8 @@ def create_purchase_order(payload: PurchaseOrderCreate, current_user=Depends(_re
 
 
 @router.get("/purchase-orders")
-def list_purchase_orders(status_filter: Optional[str] = Query(default=None, alias="status"), db: Session = Depends(get_db)):
-    query = db.query(PurchaseOrder).join(Product)
+def list_purchase_orders(status_filter: Optional[str] = Query(default=None, alias="status"), current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    query = db.query(PurchaseOrder).join(Product).filter(Product.organization_id == _organization_id(current_user))
     if status_filter:
         query = query.filter(PurchaseOrder.status == status_filter.upper())
     orders = query.order_by(PurchaseOrder.created_at.desc()).limit(200).all()
@@ -645,11 +687,12 @@ def list_purchase_orders(status_filter: Optional[str] = Query(default=None, alia
 # ----------------- Dashboard Summary -----------------
 
 @router.get("/dashboard/summary", response_model=DashboardSummaryResponse)
-def get_dashboard_summary(db: Session = Depends(get_db)):
-    products = db.query(Product).all()
+def get_dashboard_summary(current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    organization_id = _organization_id(current_user)
+    products = db.query(Product).filter(Product.organization_id == organization_id).all()
     total_products = len(products)
 
-    recs = db.query(InventoryRecommendation).join(Product).all()
+    recs = db.query(InventoryRecommendation).join(Product).filter(Product.organization_id == organization_id).all()
     reorder_count = sum(1 for r in recs if r.recommendation in ["REORDER_NOW", "REORDER_SOON"])
     high_risk_count = sum(1 for r in recs if r.stockout_risk in ["CRITICAL", "HIGH"])
     overstock_count = sum(1 for r in recs if r.recommendation == "OVERSTOCK")
@@ -664,7 +707,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     avg_coverage = round(sum(coverages) / len(coverages), 1) if coverages else 0.0
 
     # Model metrics
-    forecast_engine = ForecastEngine.get_instance()
+    forecast_engine = _workspace_forecast_engine(organization_id)
     meta = forecast_engine.get_metadata()
     test_metrics = meta.get("test_metrics", {})
     avg_wape = test_metrics.get("WAPE", 16.5)
@@ -723,7 +766,7 @@ def get_dashboard_summary(db: Session = Depends(get_db)):
     category_summary = list(cat_map.values())
 
     # Recent runs
-    model_runs = db.query(ModelRun).order_by(ModelRun.timestamp.desc()).limit(5).all()
+    model_runs = db.query(ModelRun).filter(ModelRun.organization_id == organization_id).order_by(ModelRun.timestamp.desc()).limit(5).all()
     recent_runs = [
         {
             "id": mr.id,
@@ -770,14 +813,22 @@ def _run_training_job(job_id: str) -> None:
             return
         job.status, job.progress, job.message, job.started_at = "RUNNING", 10, "Preparing training data", datetime.utcnow()
         db.commit()
-        trainer = ModelTrainingPipeline(settings.base_dir / "data" / "raw" / "historical_sales.csv")
+        if not job.organization_id:
+            raise RuntimeError("Training job has no workspace.")
+        organization_id = int(job.organization_id)
+        trainer = ModelTrainingPipeline(
+            _workspace_data_path(organization_id),
+            production_dir=_workspace_model_dir(organization_id),
+            model_version_prefix=f"org{organization_id}-",
+        )
         job.progress, job.message = 35, "Evaluating forecast candidates"
         db.commit()
         meta = trainer.run()
         job.progress, job.message = 90, "Saving champion model"
         db.commit()
-        db.query(ModelRun).filter(ModelRun.status == "PRODUCTION").update({"status": "RETIRED"})
+        db.query(ModelRun).filter(ModelRun.organization_id == organization_id, ModelRun.status == "PRODUCTION").update({"status": "RETIRED"})
         db.add(ModelRun(
+            organization_id=organization_id,
             model_name=meta["model_name"], model_version=meta["model_version"],
             training_dates=f"Historical (latest: {meta['training_date']})",
             mae=meta["test_metrics"]["MAE"], rmse=meta["test_metrics"]["RMSE"],
@@ -789,10 +840,10 @@ def _run_training_job(job_id: str) -> None:
         job.status, job.progress, job.message = "RUNNING", 90, "Saving champion model"
         job.model_version = meta["model_version"]
         db.commit()
-        ForecastEngine.get_instance().reload()
+        _workspace_forecast_engine(organization_id).reload()
         job.status, job.progress, job.message = "RUNNING", 95, "Generating forecasts and inventory decisions"
         db.commit()
-        _refresh_forecasts_and_recommendations(db)
+        _refresh_forecasts_and_recommendations(db, organization_id)
         job.status, job.progress, job.message = "SUCCEEDED", 100, "Workspace forecasts and reorder decisions are ready"
         job.completed_at = datetime.utcnow()
         db.commit()
@@ -808,9 +859,9 @@ def _run_training_job(job_id: str) -> None:
         db.close()
 
 @router.get("/models")
-def list_models(db: Session = Depends(get_db)):
-    runs = db.query(ModelRun).order_by(ModelRun.timestamp.desc()).all()
-    engine = ForecastEngine.get_instance()
+def list_models(current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    runs = db.query(ModelRun).filter(ModelRun.organization_id == _organization_id(current_user)).order_by(ModelRun.timestamp.desc()).all()
+    engine = _workspace_forecast_engine(_organization_id(current_user))
     meta = engine.get_metadata()
 
     # If database runs is empty, return metadata
@@ -835,9 +886,9 @@ def list_models(db: Session = Depends(get_db)):
     return res
 
 @router.get("/models/{model_version}/metrics")
-def get_model_metrics(model_version: str, db: Session = Depends(get_db)):
-    run = db.query(ModelRun).filter(ModelRun.model_version == model_version).first()
-    engine = ForecastEngine.get_instance()
+def get_model_metrics(model_version: str, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    run = db.query(ModelRun).filter(ModelRun.model_version == model_version, ModelRun.organization_id == _organization_id(current_user)).first()
+    engine = _workspace_forecast_engine(_organization_id(current_user))
     meta = engine.get_metadata()
 
     if run:
@@ -863,10 +914,11 @@ def get_model_metrics(model_version: str, db: Session = Depends(get_db)):
 def train_model_endpoint(background_tasks: BackgroundTasks, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
     if current_user.role not in ROLE_PERMISSIONS or "train_models" not in ROLE_PERMISSIONS.get(current_user.role, []):
         create_error("FORBIDDEN", "Insufficient permissions to train models.", 403)
-    active_job = db.query(TrainingJob).filter(TrainingJob.status.in_(["QUEUED", "RUNNING"])).first()
+    organization_id = _organization_id(current_user)
+    active_job = db.query(TrainingJob).filter(TrainingJob.organization_id == organization_id, TrainingJob.status.in_(["QUEUED", "RUNNING"])).first()
     if active_job:
         create_error("JOB_IN_PROGRESS", "A model training job is already running.", 409)
-    job = TrainingJob(id=str(uuid.uuid4()), requested_by=current_user.username)
+    job = TrainingJob(id=str(uuid.uuid4()), organization_id=organization_id, requested_by=current_user.username)
     db.add(job)
     db.commit()
     background_tasks.add_task(_run_training_job, job.id)
@@ -874,13 +926,13 @@ def train_model_endpoint(background_tasks: BackgroundTasks, current_user=Depends
 
 
 @router.get("/models/jobs")
-def list_training_jobs(db: Session = Depends(get_db)):
-    return [_serialize_training_job(job) for job in db.query(TrainingJob).order_by(TrainingJob.created_at.desc()).limit(20).all()]
+def list_training_jobs(current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    return [_serialize_training_job(job) for job in db.query(TrainingJob).filter(TrainingJob.organization_id == _organization_id(current_user)).order_by(TrainingJob.created_at.desc()).limit(20).all()]
 
 
 @router.get("/models/jobs/{job_id}")
-def get_training_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.query(TrainingJob).filter(TrainingJob.id == job_id).first()
+def get_training_job(job_id: str, current_user=Depends(_require_auth), db: Session = Depends(get_db)):
+    job = db.query(TrainingJob).filter(TrainingJob.id == job_id, TrainingJob.organization_id == _organization_id(current_user)).first()
     if not job:
         create_error("JOB_NOT_FOUND", f"Training job '{job_id}' not found.", 404)
     return _serialize_training_job(job)
@@ -890,12 +942,13 @@ def promote_model(model_version: str, current_user = Depends(_require_auth), db:
     if current_user.role not in ROLE_PERMISSIONS or "manage_models" not in ROLE_PERMISSIONS.get(current_user.role, []):
         create_error("FORBIDDEN", "Insufficient permissions.", 403)
     """Promotes a validated model version to production by swapping artifacts."""
-    run = db.query(ModelRun).filter(ModelRun.model_version == model_version).first()
+    organization_id = _organization_id(current_user)
+    run = db.query(ModelRun).filter(ModelRun.model_version == model_version, ModelRun.organization_id == organization_id).first()
     if not run:
         create_error("MODEL_NOT_FOUND", f"Model version '{model_version}' not found in registry.", 404)
 
     # Locate the experiment artifact for this version
-    exp_dir = settings.base_dir / "models" / "experiments"
+    exp_dir = _workspace_model_dir(organization_id) / "experiments"
     exp_artifact = exp_dir / f"{run.model_name.lower().replace(' ', '_')}_{model_version}.joblib"
     exp_metadata = exp_dir / f"metadata_{model_version}.json"
 
@@ -904,19 +957,21 @@ def promote_model(model_version: str, current_user = Depends(_require_auth), db:
                      f"Artifact for version {model_version} not found in experiments directory.", 404)
 
     # Retire previous production models
-    db.query(ModelRun).filter(ModelRun.status == "PRODUCTION").update({"status": "RETIRED"})
+    db.query(ModelRun).filter(ModelRun.organization_id == organization_id, ModelRun.status == "PRODUCTION").update({"status": "RETIRED"})
     run.status = "PRODUCTION"
     db.commit()
 
     # Physically swap the production artifacts so the promoted version actually serves traffic
     import shutil
-    prod_artifact = Path(settings.model_path)
-    prod_metadata = Path(settings.metadata_path)
+    prod_dir = _workspace_model_dir(organization_id)
+    prod_dir.mkdir(parents=True, exist_ok=True)
+    prod_artifact = prod_dir / "demand_model.joblib"
+    prod_metadata = prod_dir / "metadata.json"
     shutil.copy2(exp_artifact, prod_artifact)
     if exp_metadata.exists():
         shutil.copy2(exp_metadata, prod_metadata)
 
-    ForecastEngine.get_instance().reload()
+    _workspace_forecast_engine(organization_id).reload()
     return {
         "status": "SUCCESS",
         "message": f"Model {model_version} promoted to PRODUCTION. Artifacts swapped.",
@@ -965,7 +1020,7 @@ async def preview_data_upload(
     if is_valid:
         clean_df, audit = clean_sales_data(normalized_df)
         upload_id = str(uuid.uuid4())
-        pending_dir = settings.base_dir / "data" / "uploads" / "pending"
+        pending_dir = settings.base_dir / "data" / "workspaces" / str(_organization_id(current_user)) / "pending"
         pending_dir.mkdir(parents=True, exist_ok=True)
         pending_path = pending_dir / f"{upload_id}.csv"
         pending_path.write_bytes(normalized_df.to_csv(index=False).encode("utf-8"))
@@ -996,18 +1051,19 @@ def confirm_data_upload(
     pending_path = _pending_uploads.pop(upload_id, None)
     if not pending_path or not pending_path.exists():
         create_error("UPLOAD_NOT_FOUND", "This upload preview has expired. Upload the CSV again.", 404)
-    target_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    organization_id = _organization_id(current_user)
+    target_path = _workspace_data_path(organization_id)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     if target_path.exists():
         import shutil
-        history_dir = settings.base_dir / "data" / "uploads" / "history"
+        history_dir = settings.base_dir / "data" / "workspaces" / str(organization_id) / "history"
         history_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(target_path, history_dir / f"historical_sales_{datetime.utcnow():%Y%m%d_%H%M%S}.csv")
     os.replace(pending_path, target_path)
     invalidate_cleaned_cache()
     clean_df, report, audit = load_and_prepare_data(target_path)
-    synced = _replace_workspace_data(db, clean_df)
-    job = TrainingJob(id=str(uuid.uuid4()), requested_by=current_user.username)
+    synced = _replace_workspace_data(db, clean_df, organization_id)
+    job = TrainingJob(id=str(uuid.uuid4()), organization_id=organization_id, requested_by=current_user.username)
     db.add(job)
     db.commit()
     background_tasks.add_task(_run_training_job, job.id)
@@ -1031,12 +1087,19 @@ def use_demo_data(
 ):
     """Initialize an empty workspace with the included sample sales history."""
     _require_data_import_role(current_user)
-    if db.query(Product).count() > 0:
+    organization_id = _organization_id(current_user)
+    if db.query(Product).filter(Product.organization_id == organization_id).count() > 0:
         create_error("WORKSPACE_ALREADY_INITIALIZED", "This workspace already has data. Import a CSV to replace it.", 409)
     source_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    target_path = _workspace_data_path(organization_id)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    if not target_path.exists():
+        import shutil
+        shutil.copy2(source_path, target_path)
+    source_path = target_path
     clean_df, report, audit = load_and_prepare_data(source_path)
-    synced = _replace_workspace_data(db, clean_df)
-    job = TrainingJob(id=str(uuid.uuid4()), requested_by=current_user.username)
+    synced = _replace_workspace_data(db, clean_df, organization_id)
+    job = TrainingJob(id=str(uuid.uuid4()), organization_id=organization_id, requested_by=current_user.username)
     db.add(job)
     db.commit()
     background_tasks.add_task(_run_training_job, job.id)
@@ -1051,8 +1114,8 @@ def use_demo_data(
     }
 
 @router.get("/data/quality")
-def get_data_quality():
-    raw_data_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+def get_data_quality(current_user=Depends(_require_auth)):
+    raw_data_path = _workspace_data_path(_organization_id(current_user))
     if not raw_data_path.exists():
         create_error("INTERNAL_SERVER_ERROR", "Historical data source missing.", 500)
 
@@ -1068,16 +1131,16 @@ def get_data_quality():
 # ----------------- Monitoring & Drift Detection -----------------
 
 @router.get("/monitoring/drift")
-def get_drift_report(db: Session = Depends(get_db)):
+def get_drift_report(current_user=Depends(_require_auth), db: Session = Depends(get_db)):
     """Detects data/concept drift between training reference and recent production data."""
     from src.monitoring.drift_detector import DataDriftDetector
 
-    raw_data_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    raw_data_path = _workspace_data_path(_organization_id(current_user))
     if not raw_data_path.exists():
         create_error("INTERNAL_SERVER_ERROR", "Historical data source missing.", 500)
 
     clean_df, _, _ = load_and_prepare_data(raw_data_path)
-    engine = ForecastEngine.get_instance()
+    engine = _workspace_forecast_engine(_organization_id(current_user))
     metadata = engine.get_metadata()
 
     # Reference = first 70% of history (training period), current = last 30%
@@ -1111,6 +1174,39 @@ ROLE_PERMISSIONS = {
     "VIEWER": ["view_all"]
 }
 
+def _organization_slug(name: str, db: Session) -> str:
+    base = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-") or "workspace"
+    base = base[:120]
+    candidate, suffix = base, 2
+    while db.query(Organization).filter(Organization.slug == candidate).first():
+        candidate = f"{base[:130-len(str(suffix))]}-{suffix}"
+        suffix += 1
+    return candidate
+
+
+def _profile(user: User, membership: OrganizationMembership, organization: Organization, token: str) -> UserProfile:
+    return UserProfile(
+        id=str(user.id), username=user.username, name=user.username, role=membership.role,
+        token=token, organization_id=organization.id, organization_name=organization.name,
+    )
+
+
+@router.post("/auth/register", response_model=UserProfile, status_code=status.HTTP_201_CREATED)
+def register(payload: RegistrationRequest, db: Session = Depends(get_db)):
+    """Create a private organization and its first workspace administrator."""
+    username = payload.username.strip()
+    if db.query(User).filter(User.username == username).first():
+        create_error("USERNAME_UNAVAILABLE", "That username is already in use.", 409)
+    organization = Organization(name=payload.organization_name.strip(), slug=_organization_slug(payload.organization_name, db))
+    user = User(username=username, password_hash=ph.hash(payload.password), role="ADMIN", is_active=True)
+    db.add_all([organization, user])
+    db.flush()
+    membership = OrganizationMembership(organization_id=organization.id, user_id=user.id, role="ADMIN")
+    raw_token = token_urlsafe(32)
+    db.add_all([membership, Session(user_id=user.id, token_hash=_hash_token(raw_token), expires_at=datetime.utcnow() + timedelta(days=7))])
+    db.commit()
+    return _profile(user, membership, organization, raw_token)
+
 @router.post("/auth/login", response_model=UserProfile)
 def login(payload: LoginRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.username == payload.username).first()
@@ -1138,13 +1234,11 @@ def login(payload: LoginRequest, db: Session = Depends(get_db)):
     db.add(session)
     db.commit()
 
-    return UserProfile(
-        id=str(user.id),
-        username=user.username,
-        name=user.username,
-        role=user.role,
-        token=raw_token
-    )
+    membership = db.query(OrganizationMembership).filter(OrganizationMembership.user_id == user.id).order_by(OrganizationMembership.id).first()
+    if not membership:
+        create_error("WORKSPACE_REQUIRED", "This account is not assigned to a workspace.", 403)
+    organization = db.query(Organization).filter(Organization.id == membership.organization_id).first()
+    return _profile(user, membership, organization, raw_token)
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
@@ -1170,4 +1264,8 @@ def get_current_user(db: Session = Depends(get_db), authorization: Optional[str]
     user = db.query(User).filter(User.id == session.user_id).first()
     if not user or not user.is_active:
         create_error("UNAUTHORIZED", "User account disabled.", 401)
-    return UserProfile(id=str(user.id), username=user.username, name=user.username, role=user.role, token=raw_token)
+    membership = db.query(OrganizationMembership).filter(OrganizationMembership.user_id == user.id).order_by(OrganizationMembership.id).first()
+    if not membership:
+        create_error("WORKSPACE_REQUIRED", "This account is not assigned to a workspace.", 403)
+    organization = db.query(Organization).filter(Organization.id == membership.organization_id).first()
+    return _profile(user, membership, organization, raw_token)

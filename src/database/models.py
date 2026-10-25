@@ -5,11 +5,30 @@ from sqlalchemy import (
 from sqlalchemy.orm import relationship
 from src.database.session import Base
 
+
+class Organization(Base):
+    __tablename__ = "organizations"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(120), nullable=False)
+    slug = Column(String(140), nullable=False, unique=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class OrganizationMembership(Base):
+    __tablename__ = "organization_memberships"
+    id = Column(Integer, primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=False, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    role = Column(String(20), nullable=False, default="VIEWER")
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    __table_args__ = (Index("uq_organization_member", "organization_id", "user_id", unique=True),)
+
 class Product(Base):
     __tablename__ = "products"
 
     id = Column(Integer, primary_key=True, index=True)
-    product_code = Column(String(50), unique=True, index=True, nullable=False)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
+    product_code = Column(String(50), index=True, nullable=False)
     product_name = Column(String(200), nullable=False)
     category = Column(String(100), index=True, nullable=False)
     unit_price = Column(Float, nullable=False, default=0.0)
@@ -24,6 +43,7 @@ class Product(Base):
     recommendations = relationship("InventoryRecommendation", back_populates="product", cascade="all, delete-orphan")
     inventory_transactions = relationship("InventoryTransaction", back_populates="product", cascade="all, delete-orphan")
     purchase_orders = relationship("PurchaseOrder", back_populates="product", cascade="all, delete-orphan")
+    __table_args__ = (Index("uq_products_organization_code", "organization_id", "product_code", unique=True),)
 
 class Sale(Base):
     __tablename__ = "sales"
@@ -126,6 +146,7 @@ class ModelRun(Base):
     __tablename__ = "model_runs"
 
     id = Column(Integer, primary_key=True, index=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
     model_name = Column(String(100), nullable=False)
     model_version = Column(String(50), unique=True, nullable=False, index=True)
     training_dates = Column(String(100), nullable=True)
@@ -142,6 +163,7 @@ class TrainingJob(Base):
     __tablename__ = "training_jobs"
 
     id = Column(String(36), primary_key=True)
+    organization_id = Column(Integer, ForeignKey("organizations.id"), nullable=True, index=True)
     status = Column(String(20), nullable=False, default="QUEUED", index=True)
     progress = Column(Integer, nullable=False, default=0)
     message = Column(String(500), nullable=False, default="Queued for training")
@@ -161,6 +183,7 @@ class User(Base):
     role = Column(String(20), nullable=False, default="VIEWER")
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    memberships = relationship("OrganizationMembership", foreign_keys="OrganizationMembership.user_id")
 
 class Session(Base):
     __tablename__ = "sessions"

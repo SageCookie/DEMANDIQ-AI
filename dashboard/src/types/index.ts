@@ -170,4 +170,6 @@ export interface User {
   name: string;
   role: UserRole;
   token: string;
+  organization_id: number;
+  organization_name: string;
 }

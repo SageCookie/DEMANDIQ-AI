@@ -11,13 +11,15 @@ from src.features.engineering import create_time_series_features, ALL_MODEL_FEAT
 from src.utils.logger import logger
 
 class ForecastEngine:
-    _instance: Optional["ForecastEngine"] = None
-    _cached_model = None
-    _cached_metadata: Optional[Dict[str, Any]] = None
+    """Loads one workspace's production model and keeps its cache private."""
 
-    def __init__(self):
-        self.model_path = Path(settings.model_path)
-        self.metadata_path = Path(settings.metadata_path)
+    _instance: Optional["ForecastEngine"] = None
+
+    def __init__(self, model_path: Path | str | None = None, metadata_path: Path | str | None = None):
+        self.model_path = Path(model_path or settings.model_path)
+        self.metadata_path = Path(metadata_path or settings.metadata_path)
+        self._cached_model = None
+        self._cached_metadata: Optional[Dict[str, Any]] = None
 
     @classmethod
     def get_instance(cls) -> "ForecastEngine":

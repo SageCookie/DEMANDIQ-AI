@@ -32,7 +32,7 @@ def upgrade() -> None:
 
     if create('products',
         sa.Column('id', sa.Integer(), primary_key=True),
-        sa.Column('product_code', sa.String(length=50), nullable=False, unique=True),
+        sa.Column('product_code', sa.String(length=50), nullable=False),
         sa.Column('product_name', sa.String(length=200), nullable=False),
         sa.Column('category', sa.String(length=100), nullable=False),
         sa.Column('unit_price', sa.Float(), nullable=False, server_default='0'),

@@ -237,6 +237,7 @@ export function App() {
       onOpenLanding={() => setShowLanding(true)}
       onLogout={handleLogout}
       userName={currentUser ? (currentUser.name || currentUser.username) : undefined}
+      organizationName={currentUser?.organization_name}
     >
       {dataError && (
         <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 flex items-center justify-between gap-4 text-sm text-amber-900">

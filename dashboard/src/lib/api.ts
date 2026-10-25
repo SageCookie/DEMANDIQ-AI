@@ -46,7 +46,7 @@ export function onUnauthorized(handler: UnauthorizedHandler | null): void {
 
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   const token = getStoredToken();
-  const isAuthEndpoint = endpoint === "/auth/login";
+  const isAuthEndpoint = endpoint === "/auth/login" || endpoint === "/auth/register";
 
   const authHeaders: Record<string, string> = {};
   if (token && !isAuthEndpoint) {
@@ -145,6 +145,8 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ username, password }),
     }),
+  register: (organizationName: string, username: string, password: string) =>
+    request<User>("/auth/register", { method: "POST", body: JSON.stringify({ organization_name: organizationName, username, password }) }),
   logout: () => request<void>("/auth/logout", { method: "POST" }),
   getCurrentUser: () => request<User>("/auth/me"),
 };
