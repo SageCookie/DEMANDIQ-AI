@@ -110,26 +110,13 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
     );
   }
 
-  if (loadError || !data) {
-    return (
-      <div className="card p-8 text-center">
-        <AlertTriangle className="mx-auto h-8 w-8 text-amber-500" />
-        <h2 className="mt-3 text-sm font-extrabold text-slate-900">Data quality is not available yet</h2>
-        <p className="mx-auto mt-2 max-w-lg text-xs leading-5 text-slate-600">{loadError || "Import a dataset before running the quality audit."}</p>
-        <div className="mt-4 flex justify-center gap-2">
-          <button onClick={loadData} className="btn-secondary"><RefreshCw className="h-3.5 w-3.5" /> Try again</button>
-          {canImport && <label className="btn-primary cursor-pointer"><Upload className="h-3.5 w-3.5" /> Import CSV<input id="quality-csv-input" type="file" accept=".csv,text/csv" className="hidden" disabled={uploading} onChange={(e) => handlePreview(e.target.files?.[0])} /></label>}
-        </div>
-      </div>
-    );
-  }
-
-  const { validation_report, cleaning_audit, health_score, total_records } = data;
+  const hasData = Boolean(data);
+  const { validation_report, cleaning_audit, health_score, total_records } = data || {} as DataQualityReport;
 
   return (
     <div className="space-y-6">
       {/* Health Score Overview Banner */}
-      <div className="card p-6 bg-gradient-to-r from-emerald-50/60 via-blue-50/30 to-white flex flex-col md:flex-row md:items-center justify-between gap-4">
+      {hasData ? <div className="card p-6 bg-gradient-to-r from-emerald-50/60 via-blue-50/30 to-white flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div className="flex items-center gap-4">
           <div className="w-16 h-16 rounded-2xl bg-white border border-emerald-200 flex flex-col items-center justify-center shadow-sm">
             <span className="text-xl font-black text-emerald-600">{health_score}</span>
@@ -150,7 +137,15 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
           <RefreshCw className="w-3.5 h-3.5" />
           <span>Re-validate</span>
         </button>
-      </div>
+      </div> : <div className="card p-6 border border-blue-100 bg-gradient-to-r from-blue-50 via-white to-white">
+        <div className="flex items-start gap-3">
+          <div className="rounded-xl bg-blue-100 p-2 text-blue-700"><Database className="h-5 w-5" /></div>
+          <div>
+            <h2 className="text-base font-extrabold text-slate-900">Start your workspace data quality audit</h2>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-600">{loadError || "Upload your first sales CSV below. DemandIQ will preview it, map common headings, validate it, and then show the complete health and cleaning audit."}</p>
+          </div>
+        </div>
+      </div>}
 
       <div className="card p-6 space-y-4">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
@@ -209,6 +204,7 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
         )}
       </div>
 
+      {hasData && <>
       {/* Metrics Grid */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <div className="card p-4 space-y-1">
@@ -284,6 +280,7 @@ export const DataQualityPage: React.FC<DataQualityPageProps> = ({ currentRole, o
           </div>
         </div>
       </div>
+      </>}
     </div>
   );
 };
