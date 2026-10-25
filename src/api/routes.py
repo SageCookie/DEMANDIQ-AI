@@ -74,6 +74,22 @@ def _workspace_data_path(organization_id: int) -> Path:
     return settings.base_dir / "data" / "workspaces" / str(organization_id) / "historical_sales.csv"
 
 
+def _workspace_read_data_path(organization_id: int) -> Path:
+    """Return the workspace dataset, with a one-time compatibility fallback.
+
+    Existing installations had their first dataset at data/raw/historical_sales.csv
+    before workspace folders existed. Only the migrated default workspace may read
+    that legacy file; newly registered organisations never use it.
+    """
+    workspace_path = _workspace_data_path(organization_id)
+    if workspace_path.exists():
+        return workspace_path
+    legacy_path = settings.base_dir / "data" / "raw" / "historical_sales.csv"
+    if organization_id == 1 and legacy_path.exists():
+        return legacy_path
+    return workspace_path
+
+
 def _workspace_model_dir(organization_id: int) -> Path:
     return settings.base_dir / "models" / "workspaces" / str(organization_id)
 
@@ -105,7 +121,7 @@ _MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
 def _get_cleaned_data(organization_id: int):
     """Return cached cleaned DataFrame, re-loading only if the source CSV changed."""
-    raw_path = _workspace_data_path(organization_id)
+    raw_path = _workspace_read_data_path(organization_id)
     try:
         mtime = raw_path.stat().st_mtime
     except OSError:
@@ -471,7 +487,7 @@ def generate_forecast_endpoint(payload: ForecastRequest, current_user = Depends(
     if not prod:
         create_error("PRODUCT_NOT_FOUND", f"Product '{payload.product_id}' not found.", 404)
 
-    raw_data_path = _workspace_data_path(organization_id)
+    raw_data_path = _workspace_read_data_path(organization_id)
     if not raw_data_path.exists():
         create_error("INTERNAL_SERVER_ERROR", "Historical dataset not initialized.", 500)
 
@@ -817,7 +833,7 @@ def _run_training_job(job_id: str) -> None:
             raise RuntimeError("Training job has no workspace.")
         organization_id = int(job.organization_id)
         trainer = ModelTrainingPipeline(
-            _workspace_data_path(organization_id),
+            _workspace_read_data_path(organization_id),
             production_dir=_workspace_model_dir(organization_id),
             model_version_prefix=f"org{organization_id}-",
         )
@@ -1115,7 +1131,7 @@ def use_demo_data(
 
 @router.get("/data/quality")
 def get_data_quality(current_user=Depends(_require_auth)):
-    raw_data_path = _workspace_data_path(_organization_id(current_user))
+    raw_data_path = _workspace_read_data_path(_organization_id(current_user))
     if not raw_data_path.exists():
         create_error("INTERNAL_SERVER_ERROR", "Historical data source missing.", 500)
 
@@ -1135,7 +1151,7 @@ def get_drift_report(current_user=Depends(_require_auth), db: Session = Depends(
     """Detects data/concept drift between training reference and recent production data."""
     from src.monitoring.drift_detector import DataDriftDetector
 
-    raw_data_path = _workspace_data_path(_organization_id(current_user))
+    raw_data_path = _workspace_read_data_path(_organization_id(current_user))
     if not raw_data_path.exists():
         create_error("INTERNAL_SERVER_ERROR", "Historical data source missing.", 500)
 
