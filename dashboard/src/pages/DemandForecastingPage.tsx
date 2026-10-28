@@ -186,6 +186,12 @@ export const DemandForecastingPage: React.FC<DemandForecastingPageProps> = ({
         </div>
       )}
 
+      {error?.includes("Forecasting model is currently unavailable") && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          This workspace needs a trained forecasting model before predictions can be generated. If you have just imported data, wait for workspace preparation to finish; otherwise, start training from Model Registry.
+        </div>
+      )}
+
       {/* Summary Row */}
       {selectedProduct && forecastData && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

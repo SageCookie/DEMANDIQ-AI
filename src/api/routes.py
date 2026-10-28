@@ -96,7 +96,17 @@ def _workspace_model_dir(organization_id: int) -> Path:
 
 def _workspace_forecast_engine(organization_id: int) -> ForecastEngine:
     model_dir = _workspace_model_dir(organization_id)
-    return ForecastEngine(model_dir / "demand_model.joblib", model_dir / "metadata.json")
+    workspace_model = model_dir / "demand_model.joblib"
+    workspace_metadata = model_dir / "metadata.json"
+    if workspace_model.exists():
+        return ForecastEngine(workspace_model, workspace_metadata)
+
+    # The first installation predates organization-scoped model folders. Its
+    # already-trained production model remains valid for the migrated default
+    # workspace only. New organizations must train their own model.
+    if organization_id == 1 and Path(settings.model_path).exists():
+        return ForecastEngine(settings.model_path, settings.metadata_path)
+    return ForecastEngine(workspace_model, workspace_metadata)
 
 
 def _session_from_authorization(authorization: Optional[str], db: Session) -> Session:
